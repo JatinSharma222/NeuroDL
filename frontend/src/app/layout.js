@@ -2,7 +2,7 @@ import localFont from "next/font/local";
 import "./globals.css";
 import Navbar from "./components/Navbar";
 import Footer from "./components/Footer";
-import { Analytics } from "@vercel/analytics/react"
+import { Analytics } from "@vercel/analytics/react";
 import { ChakraProvider } from "@chakra-ui/react";
 
 const geistSans = localFont({
@@ -10,6 +10,7 @@ const geistSans = localFont({
   variable: "--font-geist-sans",
   weight: "100 900",
 });
+
 const geistMono = localFont({
   src: "./fonts/GeistMonoVF.woff",
   variable: "--font-geist-mono",
@@ -17,8 +18,9 @@ const geistMono = localFont({
 });
 
 export const metadata = {
-  title: "NeuroDL",
-  description: 'NeuroDL is an advanced web application for the detection and analysis of brain tumors, providing accurate insights and visualizations to assist in diagnosis and treatment decisions.',
+  title: "NeuroDL - AI Brain Tumor Detection",
+  description: 'Advanced deep learning platform for brain tumor detection and classification from MRI scans. 84.13% accuracy with ResNet50V2.',
+  keywords: 'brain tumor, AI, deep learning, medical imaging, MRI analysis, tumor detection',
 };
 
 export default function RootLayout({ children }) {
@@ -26,17 +28,18 @@ export default function RootLayout({ children }) {
     <html lang="en" suppressHydrationWarning>
       <head>
         <link rel="icon" href="/icon3.png" type="image/png" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
         suppressHydrationWarning
       >
-      <Analytics/>
-      <ChakraProvider>
-      <Navbar/>
-        {children}
-        <Footer/>
-      </ChakraProvider>
+        <Analytics />
+        <ChakraProvider>
+          <Navbar />
+          {children}
+          <Footer />
+        </ChakraProvider>
       </body>
     </html>
   );

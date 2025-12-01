@@ -4,13 +4,18 @@ import ImageUploader from './ImageUploader';
 
 const InferenceForm = () => {
   return (
-    <div className=" mx-auto p-6 bg-white shadow-md rounded-md">
-  <h2 className="text-md sm:text-4xl font-semibold text-gray-800 mb-4 text-center">
-    Upload MRI Image for Inference
-  </h2>
-  <ImageUploader />
-</div>
-
+    <div className="space-y-8">
+      <div className="text-center">
+        <h2 className="text-4xl font-bold text-black mb-4">
+          Upload MRI Scan
+        </h2>
+        <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+          Select a sample or upload your own MRI to get instant AI analysis
+        </p>
+      </div>
+      
+      <ImageUploader />
+    </div>
   );
 };
 

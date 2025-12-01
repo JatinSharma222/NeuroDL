@@ -7,184 +7,185 @@ import { useToast } from '@chakra-ui/react';
 const APIRequest = ({ image }) => {
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [info, setInfo] = useState("Enable to get details.");
-  const toast = useToast()
+  const [info, setInfo] = useState("");
+  const toast = useToast();
+
+  const tumorInfo = {
+    0: {
+      name: "Glioma Tumor",
+      content: `## Glioma Tumor\n\n**Description**: Aggressive malignant brain tumor from glial cells requiring multi-modal treatment.\n\n**Action**: Consult neurosurgeon and oncologist immediately for personalized treatment plan.\n\n**Implications**: May cause seizures, cognitive difficulties, and functional impairment.`
+    },
+    1: {
+      name: "Meningioma Tumor",
+      content: `## Meningioma Tumor\n\n**Description**: Usually benign tumor from protective brain layers. 90% are non-cancerous.\n\n**Action**: Consult neurosurgeon for evaluation. Regular MRI monitoring recommended.\n\n**Implications**: May cause headaches, vision problems, and neurological symptoms if untreated.`
+    },
+    2: {
+      name: "No Tumor",
+      content: `## No Tumor Detected\n\n**Description**: No abnormal growths identified. Healthy brain tissue with normal structures.\n\n**Action**: Maintain regular health check-ups as advised by your healthcare provider.\n\n**Note**: If experiencing symptoms, consult your doctor for comprehensive evaluation.`
+    },
+    3: {
+      name: "Pituitary Tumor",
+      content: `## Pituitary Tumor\n\n**Description**: Usually benign adenoma affecting pituitary gland and hormone production.\n\n**Action**: Consult endocrinologist for hormonal evaluation and treatment options.\n\n**Implications**: May cause vision changes, hormonal imbalances, and headaches.`
+    }
+  };
 
   const sendRequest = async () => {
-
-    // TumorInfo.jsx
-const MeningiomaMarkdown = `
-## Tumor Type: Meningioma
-**Description**: Meningioma is a tumor that develops from the protective layers covering the brain and spinal cord. While most meningiomas are benign (non-cancerous), they can cause symptoms due to their location.
-
-**What Patients Should Do**: Consult a neurosurgeon for further evaluation and possible surgical intervention if symptomatic. Regular monitoring through MRI scans is often recommended to track any changes in size or symptoms.
-
-**Implications**: Potential headaches, vision problems, and neurological deficits if left untreated.
-`;
-
-const GlioblastomaMarkdown = `
-## Tumor Type: Glioblastoma
-**Description**: Glioblastoma is a highly aggressive and malignant brain tumor that originates from glial cells. It is cancerous and typically requires a multi-modal treatment approach, including surgery, radiation therapy, and chemotherapy.
-
-**What Patients Should Do**: Discuss treatment options with an oncologist to formulate a personalized care plan. The prognosis can vary, but early intervention is crucial to managing symptoms and improving quality of life.
-
-**Implications**: May include seizures, cognitive difficulties, and significant functional impairment.
-`;
-
-const PituitaryAdenomaMarkdown = `
-## Tumor Type: Pituitary Adenoma
-**Description**: Pituitary adenomas are usually benign tumors of the pituitary gland that can affect hormone production and lead to various health issues.
-
-**What Patients Should Do**: Seek an endocrinologist for evaluation and possible treatment, which may include medication or surgery. While most pituitary adenomas are not cancerous, they can cause significant symptoms depending on their size and the hormones involved.
-
-**Implications**: Vision changes, hormonal deficiencies, and headaches.
-`;
-
-const NoTumorMarkdown = `
-## No Tumor
-**Description**: No tumor detected. This result indicates that there are no abnormal growths identified in the imaging studies.
-
-**What Patients Should Do**: Maintain regular health check-ups and screenings as advised by their healthcare provider. Staying informed about any symptoms or changes in health is essential for early detection of potential issues.
-`;
-
     const formData = new FormData();
     formData.append('image', image);
 
     setLoading(true);
+    setResponse(null);
+    setInfo("");
+    
     try {
-      // Use environment variable or fallback to localhost
       const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
-      
       const res = await fetch(`${API_URL}/predict`, {
         method: 'POST',
         body: formData,
       });
 
-      console.log('Response:', res);
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
 
       const data = await res.json();
-
-      console.log('Data:', data);
+      const result = tumorInfo[data.final_class];
       
-      if(data){
-        toast({
-          title: `Diagnosis is ready!`,
-          status: "success",
-          isClosable: true,
-        })
+      if (result) {
+        data.class_name = result.name;
+        setInfo(result.content);
       }
       
-      switch (data.final_class) {
-        case 0: {
-          data.final_class="No Tumor"
-          setInfo(NoTumorMarkdown)
-        }
-          break;
-        case 1: {
-          data.final_class="Glioma Tumor"
-          setInfo(GlioblastomaMarkdown)
-        }
-          break;
-        case 2: {
-          data.final_class="Meningioma Tumor"
-          setInfo(MeningiomaMarkdown)
-        }
-          break;
-        case 3: {
-          data.final_class="Pituitary Tumor"
-          setInfo(PituitaryAdenomaMarkdown)
-        }
-          break;
-        default: 
-          data.final_class="Enable to predict."
-          break;
-      }
+      setResponse(data);
 
-      if (res.ok) {
-        setResponse(data);
-      } else {
-        throw new Error(data.error || 'Error occurred');
-      }
-    } catch (error) {
-      console.error('Error making request:', error);
-      setResponse({ error: error.message });
       toast({
-        title: `Error`,
+        title: "Analysis Complete!",
+        description: `Detected: ${result?.name || 'Unknown'}`,
+        status: "success",
+        duration: 5000,
+        isClosable: true,
+      });
+      
+    } catch (error) {
+      console.error('Analysis error:', error);
+      setResponse({ error: error.message });
+      
+      toast({
+        title: "Analysis Failed",
         description: error.message,
         status: "error",
+        duration: 5000,
         isClosable: true,
-      })
+      });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (
-    <div className="sm:mt-6 text-center">
-  <button
-    onClick={sendRequest}
-    disabled={loading}
-    className={`${
-      loading ? 'bg-black sm:px-8 rounded-xl sm:w-24 sm:h-24 text-center border-2 text-white border-black ' : 'bg-fuchsia-300 text-black sm:p-2 text-center sm:text-xl border-black border-2 sm:m-3 rounded-md'
-    } `}
-  >
-    {loading ? (
-      <div className=''>
-        <Loader/>
+    <div className="space-y-8 mt-8">
+      {/* Analyze Button */}
+      <div className="text-center">
+        <button
+          onClick={sendRequest}
+          disabled={loading}
+          className={`btn ${loading ? 'btn-disabled' : 'btn-primary'} text-lg px-12 py-4`}
+        >
+          {loading ? (
+            <span className="flex items-center gap-3">
+              <Loader />
+              <span>Analyzing...</span>
+            </span>
+          ) : (
+            <span className="flex items-center gap-3">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+              </svg>
+              <span>Analyze Now</span>
+            </span>
+          )}
+        </button>
       </div>
-    ):("Send for Analysis"
-    )}
-  </button>
 
-  {response && response.final_class !== undefined && (
-    <p className="sm:mt-4 sm:text-3xl font-semibold text-black">
-      Diagnosis: {response.final_class}
-    </p>
-  )}
+      {/* Results */}
+      {response && !response.error && (
+        <div className="fade-in space-y-8">
+          {/* Diagnosis Badge */}
+          <div className="text-center">
+            <div className="result-badge inline-flex">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>Diagnosis: {response.class_name}</span>
+            </div>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-4 text-sm text-gray-600">
+              <span className="badge badge-primary">
+                Confidence: {response.confidence}
+              </span>
+              <span className="badge badge-info">
+                Model: {response.model_used}
+              </span>
+              <span className="badge badge-success">
+                Accuracy: {response.model_accuracy}
+              </span>
+            </div>
+          </div>
 
-  <div className="flex flex-col md:flex-row sm:mt-6 sm:space-y-4 md:space-y-0 sm:p-4 sm:space-x-4">
-    <div className="bg-gray-50 sm:p-4 border border-gray-200 rounded-lg flex flex-col items-center w-full md:w-1/2">
-      <h3 className="sm:text-lg font-semibold text-gray-700 sm:mb-2 ">Click image to upload</h3>
-      <div>
-      {image ? (
-        <img
-          src={URL.createObjectURL(image)}
-          alt="Original MRI"
-          className="w-full sm:h-auto"
-        />
-      ) : (
-        <div className="text-gray-400">
-          <img
-        src="/pexels-googledeepmind-17483868.jpg"
-        alt="Background"
-        className="sm:object-cover sm:w-50 sm:h-50 rounded-lg "
-      />
+          {/* Image Comparison */}
+          <div className="result-container">
+            <div className="result-card">
+              <h3 className="text-lg font-bold text-black mb-4">Original MRI</h3>
+              <div className="card-image">
+                <img src={URL.createObjectURL(image)} alt="Original MRI" />
+              </div>
+              <p className="text-sm text-gray-600 mt-3">Uploaded scan for analysis</p>
+            </div>
+
+            {response.segment_image && (
+              <div className="result-card">
+                <h3 className="text-lg font-bold text-black mb-4">Tumor Segmentation</h3>
+                <div className="card-image">
+                  <img src={`data:image/jpeg;base64,${response.segment_image}`} alt="Segmented" />
+                </div>
+                <p className="text-sm text-gray-600 mt-3">Highlighted tumor region</p>
+              </div>
+            )}
+          </div>
+
+          {/* Detailed Info */}
+          {info && (
+            <div className="info-section markdown-content">
+              <ReactMarkdown>{info}</ReactMarkdown>
+            </div>
+          )}
+
+          {/* Warning */}
+          <div className="alert alert-warning">
+            <svg className="w-6 h-6 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+            </svg>
+            <div>
+              <p className="font-bold mb-1">Important Medical Notice</p>
+              <p className="text-sm leading-relaxed">
+                This is for research and education only. Not for clinical diagnosis. 
+                Always consult qualified healthcare professionals for medical advice.
+              </p>
+            </div>
+          </div>
         </div>
       )}
-       </div>
-    </div>
 
-    {response && response.segment_image && (
-    <div className="bg-gray-50 sm:p-4 border border-gray-200 rounded-lg flex flex-col items-center w-full md:w-1/2">
-      <h3 className="sm:text-lg font-semibold text-gray-700 sm:mb-2">Segmented Image</h3>
-      <img
-        src={`data:image/jpeg;base64,${response.segment_image}`}
-        alt="Segmented MRI"
-        className="w-full sm:h-auto"
-      />
+      {/* Error */}
+      {response && response.error && (
+        <div className="alert alert-error">
+          <svg className="w-6 h-6 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+          </svg>
+          <div>
+            <p className="font-bold mb-1">Analysis Error</p>
+            <p className="text-sm">{response.error}</p>
+          </div>
+        </div>
+      )}
     </div>
-    )}
-  </div>
-
-  {response && response.error && (
-    <p className="sm:mt-4 text-red-500 font-semibold">Error: {response.error}</p>
-  )}
-  
-  {(response && response.final_class) && (
-    <div className="text-left markdown-content">
-      <ReactMarkdown>{info}</ReactMarkdown>
-    </div>
-  )}
-</div>
   );
 };
 
