@@ -1,0 +1,87 @@
+# ============================
+# macOS
+# ============================
+.DS_Store
+
+# ============================
+# Python / Flask backend
+# ============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environment
+venv/
+.env
+.env.*
+*.env
+*.venv
+
+# Python packaging
+*.egg-info/
+build/
+dist/
+
+# Flask instance & DB files
+instance/
+*.db
+*.sqlite
+*.sqlite3
+
+# Caches
+.pytest_cache/
+.cache/
+
+# Logs
+*.log
+logs/
+training_outputs/
+TensorBoard/
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# ML Model files
+checkpoints/
+model/
+models/
+training/
+processed/
+
+# Large datasets
+data/raw_dataset/
+data/processed/
+
+# ============================
+# Frontend: Next.js / Node
+# ============================
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/dist/
+frontend/build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env files
+frontend/.env
+frontend/.env.*
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# ============================
+# General
+# ============================
+*.swp
+*.swo
+*.swn
+.idea/
+.vscode/
