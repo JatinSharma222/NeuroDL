@@ -25,7 +25,7 @@ from skimage.transform import resize
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 CLASSIFICATION_SIZE = 128   # Must match training configuration
-SEGMENTATION_SIZE   = 256   # Must match U-Net training configuration
+SEGMENTATION_SIZE   = 224   # Must match U-Net training configuration
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────

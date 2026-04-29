@@ -29,7 +29,7 @@ from PIL import Image
 
 from src.config import RESNET50_MODEL_PATH, SEGMENTATION_MODEL_PATH
 from src.database import delete_scan, get_scan_by_id, get_scans, init_db, save_scan
-from src.gradcam import generate_gradcam
+from src.gradcam import generate_gradcam, generate_gradcam_segmentation
 from src.inference import inference_segmentation_with_overlay
 from src.preprocess import load_image, preprocess_classification
 from src.report import generate_report
@@ -179,35 +179,54 @@ def predict():
 
         # ── Step 3: Segmentation + Grad-CAM (tumour only) ─────────
         if predicted_class != 2:   # class 2 = No Tumor
-            print("[PREDICT] Tumour detected — running segmentation + Grad-CAM...")
+            print("[PREDICT] Tumour detected — running Grad-CAM + segmentation...")
 
-            # Segmentation
-            try:
-                overlay_pil = inference_segmentation_with_overlay(
-                    image_np, segmentation_model
-                )
-                buf = BytesIO()
-                overlay_pil.save(buf, format="JPEG", quality=95)
-                buf.seek(0)
-                response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
-                response["segmentation_performed"] = True
-                print("[PREDICT] ✓ Segmentation complete")
-            except Exception as seg_err:
-                print(f"[PREDICT] ✗ Segmentation failed: {seg_err}")
-
-            # Grad-CAM
+            # ── Grad-CAM heatmap overlay ──────────────────────────
             try:
                 gradcam_b64 = generate_gradcam(
                     model     = classification_model,
-                    img_array = preprocessed,          # (1, 128, 128, 3)
+                    img_array = preprocessed,
                     class_idx = predicted_class,
                 )
                 if gradcam_b64:
-                    response["gradcam_image"]    = gradcam_b64
+                    response["gradcam_image"]     = gradcam_b64
                     response["gradcam_performed"] = True
                     print("[PREDICT] ✓ Grad-CAM complete")
             except Exception as gcam_err:
                 print(f"[PREDICT] ✗ Grad-CAM failed: {gcam_err}")
+
+            # ── Segmentation overlay (Grad-CAM derived) ───────────
+            # Uses the Grad-CAM heatmap thresholded at 0.5 to produce
+            # a reliable yellow overlay across all tumour types.
+            # Falls back to U-Net if Grad-CAM segmentation fails.
+            try:
+                seg_b64 = generate_gradcam_segmentation(
+                    model          = classification_model,
+                    img_array      = preprocessed,
+                    class_idx      = predicted_class,
+                    original_image = image_np,
+                    threshold      = 0.75,
+                )
+                if seg_b64:
+                    response["segment_image"]          = seg_b64
+                    response["segmentation_performed"] = True
+                    print("[PREDICT] ✓ Segmentation complete (Grad-CAM derived)")
+                else:
+                    raise ValueError("Grad-CAM segmentation returned None")
+            except Exception as seg_err:
+                print(f"[PREDICT] Grad-CAM seg failed ({seg_err}), trying U-Net fallback...")
+                try:
+                    overlay_pil = inference_segmentation_with_overlay(
+                        image_np, segmentation_model
+                    )
+                    buf = BytesIO()
+                    overlay_pil.save(buf, format="JPEG", quality=95)
+                    buf.seek(0)
+                    response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
+                    response["segmentation_performed"] = True
+                    print("[PREDICT] ✓ Segmentation complete (U-Net fallback)")
+                except Exception as unet_err:
+                    print(f"[PREDICT] ✗ U-Net fallback also failed: {unet_err}")
 
         else:
             print("[PREDICT] No tumour — skipping segmentation & Grad-CAM")
