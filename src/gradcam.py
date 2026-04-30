@@ -111,55 +111,69 @@ def generate_gradcam_segmentation(
 
         # ── Step 2: upsample heatmap to original image size ──────
         H, W = original_image.shape[:2]
-
-        # INTER_LINEAR — no ringing, no overshoot beyond [0,1].
-        # INTER_CUBIC overshoots when upscaling a tiny 7×7 conv map,
-        # creating spuriously high values at image edges/corners that
-        # consistently beat the percentile threshold → mask lands at edge.
         heatmap_resized = cv2.resize(
             heatmap, (W, H), interpolation=cv2.INTER_LINEAR
         )
-        # Hard-clip: prevent any floating-point drift outside [0, 1]
         heatmap_resized = np.clip(heatmap_resized, 0.0, 1.0)
 
-        # ── Step 3: zero-out image border (10 % margin) ───────────
-        # Edge pixels of the upscaled heatmap are unreliable because the
-        # conv layer has no context outside the brain region. Zeroing the
-        # border ensures the threshold always picks interior brain tissue.
-        margin_h = max(1, int(H * 0.10))
-        margin_w = max(1, int(W * 0.10))
-        heatmap_inner = heatmap_resized.copy()
-        heatmap_inner[:margin_h, :]  = 0   # top
-        heatmap_inner[-margin_h:, :] = 0   # bottom
-        heatmap_inner[:, :margin_w]  = 0   # left
-        heatmap_inner[:, -margin_w:] = 0   # right
-
-        # ── Step 4: percentile threshold on the masked heatmap ────
-        # Only consider interior (non-zero) pixels for the percentile
-        # so the cutoff is not dragged down by the zeroed border.
-        interior_vals = heatmap_inner[heatmap_inner > 0]
-        if interior_vals.size == 0:
-            print("[Grad-CAM Seg] No interior activations — falling back to full map")
-            interior_vals = heatmap_resized.ravel()
-
-        # top ~20 % of interior activation → focused mask on tumour core
-        raw_cutoff = float(np.percentile(interior_vals, 80))
-        print(f"[Grad-CAM Seg] 80th-pct cutoff (interior) = {raw_cutoff:.4f}")
-
-        # ── Step 5: gentle blur for smooth edges, then threshold ──
-        sigma          = max(H, W) / 120
-        k              = int(sigma * 4) | 1
+        # ── Step 3: smooth to remove upsampling noise ────────────
+        sigma          = max(H, W) / 60
+        k              = int(sigma * 6) | 1
         heatmap_smooth = cv2.GaussianBlur(
-            heatmap_inner, (k, k), sigmaX=sigma, sigmaY=sigma
+            heatmap_resized, (k, k), sigmaX=sigma, sigmaY=sigma
         )
-        binary_mask = (heatmap_smooth >= raw_cutoff).astype(np.uint8)
+        # Re-normalise so peak is always 1.0
+        peak_val = heatmap_smooth.max()
+        if peak_val > 0:
+            heatmap_smooth = heatmap_smooth / peak_val
 
-        print(f"[Grad-CAM Seg] active after threshold: "
+        # ── Step 4: peak-anchored region growing ─────────────────
+        # The fundamental problem with any global threshold (Otsu,
+        # percentile, etc.) on a Grad-CAM map: when activations are
+        # diffuse (low confidence scans) they cover huge areas.
+        #
+        # Strategy:
+        #   a. Find the single brightest point — this is ALWAYS where
+        #      the model believes the tumour core is.
+        #   b. Threshold at 60 % of the peak value so the mask grows
+        #      outward from the peak and stops at natural drop-off edges.
+        #   c. Keep only the connected component that CONTAINS the peak.
+        #      This eliminates every stray region elsewhere in the image.
+        peak_y, peak_x = np.unravel_index(
+            np.argmax(heatmap_smooth), heatmap_smooth.shape
+        )
+        print(f"[Grad-CAM Seg] Peak activation at ({peak_x}, {peak_y}), "
+              f"value=1.00 (normalised)")
+
+        # 60 % of peak — grows a region around the hotspot,
+        # stops before the diffuse low-activation surround
+        PEAK_FRACTION = 0.60
+        binary_mask   = (heatmap_smooth >= PEAK_FRACTION).astype(np.uint8)
+
+        # ── Step 5: keep ONLY the component containing the peak ──
+        # This is the critical step — eliminates all stray regions
+        # that happen to cross the threshold elsewhere in the image.
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            binary_mask, connectivity=8
+        )
+        peak_label   = int(labels[peak_y, peak_x])
+        if peak_label == 0:
+            # Peak pixel was background — find nearest foreground component
+            nonzero_labels = [l for l in range(1, num_labels)]
+            if not nonzero_labels:
+                print("[Grad-CAM Seg] No foreground — returning None")
+                return None
+            # use largest component as fallback
+            areas      = stats[1:, cv2.CC_STAT_AREA]
+            peak_label = int(np.argmax(areas)) + 1
+
+        binary_mask = (labels == peak_label).astype(np.uint8)
+        print(f"[Grad-CAM Seg] Peak-anchored mask: "
               f"{binary_mask.sum()} px ({100*binary_mask.mean():.1f}%)")
 
-        # ── Step 5: morphological cleanup ────────────────────────
+        # ── Step 6: morphological cleanup ────────────────────────
 
-        # 5a. Closing — fill internal holes
+        # 6a. Closing — fill internal holes
         k_close = max(15, min(H, W) // 20)
         kernel_close = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (k_close, k_close)
@@ -168,7 +182,7 @@ def generate_gradcam_segmentation(
             binary_mask, cv2.MORPH_CLOSE, kernel_close, iterations=2
         )
 
-        # 5b. Opening — remove isolated noise blobs
+        # 6b. Opening — remove isolated noise blobs
         k_open = max(7, min(H, W) // 40)
         kernel_open = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (k_open, k_open)
@@ -177,21 +191,17 @@ def generate_gradcam_segmentation(
             binary_mask, cv2.MORPH_OPEN, kernel_open, iterations=1
         )
 
-        # 5c. Keep only the largest connected component
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            binary_mask, connectivity=8
-        )
-        if num_labels > 1:
-            areas      = stats[1:, cv2.CC_STAT_AREA]
-            largest_id = int(np.argmax(areas)) + 1
-            binary_mask = (labels == largest_id).astype(np.uint8)
-
-        if binary_mask.sum() == 0:
-            print("[Grad-CAM Seg] Mask empty after cleanup — returning None")
-            return None
-
-        print(f"[Grad-CAM Seg] Active after cleanup: "
-              f"{binary_mask.sum()} px ({100*binary_mask.mean():.1f}%)")
+        # 6c. Sanity check — mask should not exceed 40 % of the image.
+        # If it does, the heatmap was too diffuse; tighten to top 15 %.
+        if binary_mask.mean() > 0.40:
+            tight_cutoff = float(np.percentile(heatmap_smooth, 85))
+            binary_mask  = (heatmap_smooth >= tight_cutoff).astype(np.uint8)
+            # re-run closing to keep it clean
+            binary_mask  = cv2.morphologyEx(
+                binary_mask, cv2.MORPH_CLOSE, kernel_close, iterations=1
+            )
+            print(f"[Grad-CAM Seg] Mask too large — tightened to 85th pct "
+                  f"({tight_cutoff:.3f}), now {100*binary_mask.mean():.1f}%")
 
         # ── Step 6: semi-transparent yellow fill ─────────────────
         canvas   = original_image.astype(np.float32)

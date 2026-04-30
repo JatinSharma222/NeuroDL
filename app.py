@@ -200,11 +200,26 @@ def predict():
             # a reliable yellow overlay across all tumour types.
             # Falls back to U-Net if Grad-CAM segmentation fails.
             try:
+                # Render segmentation on the preprocessed image resized back
+                # to original dimensions — NOT on image_np directly.
+                # The Grad-CAM heatmap is computed from `preprocessed`
+                # (128×128, brain fills full frame). image_np may have black
+                # borders or different proportions, causing coordinate mismatch.
+                import cv2 as _cv2
+                H_orig, W_orig = image_np.shape[:2]
+                canvas_for_seg = (
+                    _cv2.resize(
+                        preprocessed[0],
+                        (W_orig, H_orig),
+                        interpolation=_cv2.INTER_LINEAR,
+                    ) * 255
+                ).astype(np.uint8)
+
                 seg_b64 = generate_gradcam_segmentation(
                     model          = classification_model,
                     img_array      = preprocessed,
                     class_idx      = predicted_class,
-                    original_image = image_np,
+                    original_image = canvas_for_seg,
                     threshold      = 0.75,
                 )
                 if seg_b64:
