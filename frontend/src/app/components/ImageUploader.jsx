@@ -17,9 +17,21 @@ const MAX_FILE_MB  = 16;
 const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 
 const SAMPLE_IMAGES = [
-  "/gg (26).jpg",  "/image (11).jpg", "/p (28).jpg",   "/gg (498).jpg",
-  "/m (7).jpg",    "/p (131).jpg",    "/gg (544).jpg",  "/p (210).jpg",
-  "/gg (37).jpg",  "/p (199).jpg",    "/image (46).jpg","/gg (340).jpg",
+  { src: "/sample_g1.jpg", label: "Glioma",     type: "glioma"     },
+  { src: "/sample_g2.jpg", label: "Glioma",     type: "glioma"     },
+  { src: "/sample_g3.jpg", label: "Glioma",     type: "glioma"     },
+  { src: "/sample_g4.jpg", label: "Glioma",     type: "glioma"     },
+  { src: "/sample_m1.jpg", label: "Meningioma", type: "meningioma" },
+  { src: "/sample_m2.jpg", label: "Meningioma", type: "meningioma" },
+  { src: "/sample_m3.jpg", label: "Meningioma", type: "meningioma" },
+  { src: "/sample_m4.jpg", label: "Meningioma", type: "meningioma" },
+  { src: "/sample_p1.jpg", label: "Pituitary",  type: "pituitary"  },
+  { src: "/sample_p2.jpg", label: "Pituitary",  type: "pituitary"  },
+  { src: "/sample_p3.jpg", label: "Pituitary",  type: "pituitary"  },
+  { src: "/sample_p4.jpg", label: "Pituitary",  type: "pituitary"  },
+  { src: "/sample_n1.jpg", label: "No Tumor",   type: "notumor"    },
+  { src: "/sample_n2.jpg", label: "No Tumor",   type: "notumor"    },
+  { src: "/sample_n3.jpg", label: "No Tumor",   type: "notumor"    },
 ];
 
 const isDicom = (file) =>
@@ -51,7 +63,8 @@ const ImageUploader = () => {
     try {
       const response = await fetch(imagePath);
       const blob     = await response.blob();
-      const file     = new File([blob], "sample.jpg", { type: blob.type });
+      const fileName = imagePath.split("/").pop();
+      const file     = new File([blob], fileName, { type: "image/jpeg" });
       setSelectedImage(file);
       setSizeError("");
     } catch (error) {
@@ -72,20 +85,94 @@ const ImageUploader = () => {
 
       {/* ── Sample Images ── */}
       <div className="text-center">
-        <h3 className="text-xl font-bold text-black mb-6">
+        <h3 className="text-xl font-bold text-black mb-2">
           Try with Sample Images
         </h3>
-        <div className="sample-grid">
-          {SAMPLE_IMAGES.map((image, index) => (
-            <div
-              key={index}
-              className="sample-image"
-              onClick={() => handleSampleClick(image)}
-              title={`Sample ${index + 1}`}
-            >
-              <img src={image} alt={`Sample ${index + 1}`} />
-            </div>
+        <p style={{ fontSize:"0.85rem", color:"var(--color-text-light)", marginBottom:"var(--spacing-lg)" }}>
+          Real MRI scans from the test dataset — one click to analyse
+        </p>
+
+        {/* Class colour key */}
+        <div style={{ display:"flex", flexWrap:"wrap", gap:8, justifyContent:"center", marginBottom:"var(--spacing-lg)" }}>
+          {[
+            { type:"glioma",     label:"Glioma",     color:"#fecaca", text:"#991b1b" },
+            { type:"meningioma", label:"Meningioma", color:"#fed7aa", text:"#9a3412" },
+            { type:"pituitary",  label:"Pituitary",  color:"#bbf7d0", text:"#14532d" },
+            { type:"notumor",    label:"No Tumor",   color:"#bfdbfe", text:"#1e3a8a" },
+          ].map(({ type, label, color, text }) => (
+            <span key={type} style={{
+              display:"inline-flex", alignItems:"center", gap:5,
+              padding:"3px 10px", borderRadius:99,
+              background:color, color:text,
+              fontSize:"0.75rem", fontWeight:700,
+            }}>
+              <span style={{ width:7, height:7, borderRadius:"50%", background:text }} />
+              {label}
+            </span>
           ))}
+        </div>
+
+        {/* Image grid grouped by class */}
+        <div style={{
+          display:"grid",
+          gridTemplateColumns:"repeat(4, 1fr)",
+          gap:"var(--spacing-sm)",
+          maxWidth:520,
+          margin:"0 auto",
+        }}>
+          {SAMPLE_IMAGES.map((sample, index) => {
+            const colorMap = {
+              glioma:     { bg:"#fecaca", border:"#f87171", text:"#991b1b" },
+              meningioma: { bg:"#fed7aa", border:"#fb923c", text:"#9a3412" },
+              pituitary:  { bg:"#bbf7d0", border:"#4ade80", text:"#14532d" },
+              notumor:    { bg:"#bfdbfe", border:"#60a5fa", text:"#1e3a8a" },
+            };
+            const c = colorMap[sample.type] || colorMap.notumor;
+            return (
+              <div
+                key={index}
+                onClick={() => handleSampleClick(sample.src)}
+                title={`${sample.label} — click to analyse`}
+                style={{
+                  cursor:"pointer",
+                  borderRadius:"var(--radius-md, 10px)",
+                  overflow:"hidden",
+                  border:`2px solid ${c.border}`,
+                  transition:"transform 0.15s, box-shadow 0.15s",
+                  background:"#000",
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.transform = "scale(1.05)";
+                  e.currentTarget.style.boxShadow = `0 4px 12px ${c.border}88`;
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.transform = "scale(1)";
+                  e.currentTarget.style.boxShadow = "none";
+                }}
+              >
+                {/* Image */}
+                <div style={{ aspectRatio:"1/1", overflow:"hidden" }}>
+                  <img
+                    src={sample.src}
+                    alt={sample.label}
+                    style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }}
+                  />
+                </div>
+                {/* Label chip */}
+                <div style={{
+                  background:c.bg,
+                  color:c.text,
+                  fontSize:"0.62rem",
+                  fontWeight:700,
+                  textAlign:"center",
+                  padding:"3px 4px",
+                  letterSpacing:"0.02em",
+                }}>
+                  {sample.label}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
