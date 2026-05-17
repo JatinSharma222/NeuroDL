@@ -24,8 +24,8 @@ from skimage.transform import resize
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-CLASSIFICATION_SIZE = 128   # Must match training configuration
-SEGMENTATION_SIZE   = 224   # Must match U-Net training configuration
+CLASSIFICATION_SIZE = 224   # Changed from 128 → matches training and ResNet50V2 native size
+SEGMENTATION_SIZE   = 224   # U-Net (VGG16 backbone, unchanged)
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────

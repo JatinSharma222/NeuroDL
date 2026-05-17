@@ -9,10 +9,16 @@ Upgrades wired in vs v1.0:
   [3] LLM radiology report via Ollama   (src/report.py)
   [4] Patient scan history — SQLite DB   (src/database.py)
 
+Visual analysis pipeline (two separate, independent paths):
+  - Grad-CAM  → heatmap overlay only (explains the model's decision)
+  - U-Net     → segmentation overlay only (detects actual tumour boundary)
+  These are intentionally decoupled. Grad-CAM is not used as a
+  segmentation source — it was not designed for that purpose.
+
 Endpoints:
-  GET  /          — health check
-  POST /predict   — MRI analysis (JPEG / PNG / DICOM)
-  GET  /history   — paginated scan history with filters
+  GET  /             — health check
+  POST /predict      — MRI analysis (JPEG / PNG / DICOM)
+  GET  /history      — paginated scan history with filters
   GET  /history/<id> — single scan record
   DELETE /history/<id> — delete a scan record
 """
@@ -27,17 +33,17 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from PIL import Image
 
-from src.config import RESNET50_MODEL_PATH, SEGMENTATION_MODEL_PATH
+from src.config import RESNET50_MODEL_PATH
 from src.database import delete_scan, get_scan_by_id, get_scans, init_db, save_scan
-from src.gradcam import generate_gradcam, generate_gradcam_segmentation
-from src.inference import inference_segmentation_with_overlay
+from src.gradcam import generate_gradcam, get_gradcam_heatmap
+from src.inference import gradcam_pseudo_segmentation
 from src.preprocess import load_image, preprocess_classification
 from src.report import generate_report
 from src.utils import load_local_model
 
 # ─── Initialisation ───────────────────────────────────────────────────────────
 
-load_dotenv()  # Load .env file (OLLAMA_URL, OLLAMA_MODEL, etc.)
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -52,7 +58,6 @@ CLASS_NAMES = {
 
 # ── Global model handles ──────────────────────────────────────────
 classification_model = None
-segmentation_model   = None
 app_initialized      = False
 
 
@@ -60,25 +65,18 @@ app_initialized      = False
 
 def load_models():
     """Load ML models and initialise DB — runs once before first request."""
-    global classification_model, segmentation_model
+    global classification_model
 
     print("\n" + "=" * 60)
     print("NEURODL v2.0 — STARTUP")
     print("=" * 60)
 
-    # Database
     print("\n[DB] Initialising database...")
     init_db()
 
-    # Classification model
     print(f"\n[Model] Loading classification model...")
     classification_model = load_local_model(RESNET50_MODEL_PATH)
     print(f"✓ Classification model loaded  ({RESNET50_MODEL_PATH})")
-
-    # Segmentation model
-    print(f"\n[Model] Loading segmentation model...")
-    segmentation_model = load_local_model(SEGMENTATION_MODEL_PATH, custom_loss=True)
-    print(f"✓ Segmentation model loaded   ({SEGMENTATION_MODEL_PATH})")
 
     print("\n" + "=" * 60)
     print("ALL SYSTEMS READY")
@@ -125,13 +123,16 @@ def predict():
       image      (required) : JPEG, PNG, or DICOM .dcm file
       patient_id (optional) : string identifier for the patient
 
+    Visual analysis runs two fully independent pipelines for tumours:
+      1. Grad-CAM  — heatmap overlay explaining the classifier's attention
+      2. U-Net     — pixel-level tumour boundary segmentation
+
     Returns JSON with:
       final_class, class_name, confidence, model_used, model_accuracy,
-      segmentation_performed, segment_image (base64),
-      gradcam_performed, gradcam_image (base64),
+      segmentation_performed, segment_image (base64 JPEG),
+      gradcam_performed, gradcam_image (base64 PNG),
       report, scan_id
     """
-    # ── Validate request ──────────────────────────────────────────
     if "image" not in request.files:
         return jsonify({
             "error":   "No image provided",
@@ -151,18 +152,17 @@ def predict():
 
     try:
         # ── Step 1: Load image (JPEG / PNG / DICOM) ───────────────
-        image_np = load_image(file)               # (H, W, 3) uint8
+        image_np = load_image(file)               # (H, W, 3) uint8 RGB
 
         # ── Step 2: Classify ──────────────────────────────────────
-        preprocessed     = preprocess_classification(image_np)
-        predictions      = classification_model.predict(preprocessed, verbose=0)
-        predicted_class  = int(np.argmax(predictions[0]))
-        confidence       = float(predictions[0][predicted_class])
-        class_name       = CLASS_NAMES.get(predicted_class, "Unknown")
+        preprocessed    = preprocess_classification(image_np)   # (1, 128, 128, 3)
+        predictions     = classification_model.predict(preprocessed, verbose=0)
+        predicted_class = int(np.argmax(predictions[0]))
+        confidence      = float(predictions[0][predicted_class])
+        class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
 
         print(f"[PREDICT] Result   : {class_name}  ({confidence:.2%})")
 
-        # ── Build base response ───────────────────────────────────
         response = {
             "final_class":             predicted_class,
             "class_name":              class_name,
@@ -177,74 +177,69 @@ def predict():
             "scan_id":                 None,
         }
 
-        # ── Step 3: Segmentation + Grad-CAM (tumour only) ─────────
-        if predicted_class != 2:   # class 2 = No Tumor
-            print("[PREDICT] Tumour detected — running Grad-CAM + segmentation...")
+        # ── Step 3: Visual analysis (tumour cases only) ────────────
+        # class 2 = No Tumor — skip both visual pipelines
+        if predicted_class != 2:
+            print("[PREDICT] Tumour detected — running visual analysis...")
 
-            # ── Grad-CAM heatmap overlay ──────────────────────────
+            # Compute raw Grad-CAM heatmap first — used both for the
+            # overlay display AND to guide segmentation component selection.
+            raw_heatmap = None
+            try:
+                raw_heatmap = get_gradcam_heatmap(
+                    model      = classification_model,
+                    img_array  = preprocessed,
+                    class_idx  = predicted_class,
+                )
+                if raw_heatmap is not None:
+                    print("[PREDICT] ✓ Raw Grad-CAM heatmap computed")
+                else:
+                    print("[PREDICT] ⚠ Raw heatmap returned None")
+            except Exception as hm_err:
+                print(f"[PREDICT] ✗ Raw heatmap failed: {hm_err}")
+
+            # ── Pipeline A: Grad-CAM heatmap ──────────────────────
+            # Purpose : Explains which regions of the scan the classifier
+            #           focused on when making its prediction.
+            # Source  : Gradients of class score w.r.t. conv5_block3_out.
+            # Note    : This is an *explanation* tool, not a segmentation tool.
+            #           The heatmap boundary does NOT represent the tumour edge.
             try:
                 gradcam_b64 = generate_gradcam(
-                    model     = classification_model,
-                    img_array = preprocessed,
-                    class_idx = predicted_class,
+                    model          = classification_model,
+                    img_array      = preprocessed,
+                    class_idx      = predicted_class,
+                    original_image = image_np,      # render at full resolution
                 )
                 if gradcam_b64:
                     response["gradcam_image"]     = gradcam_b64
                     response["gradcam_performed"] = True
                     print("[PREDICT] ✓ Grad-CAM complete")
+                else:
+                    print("[PREDICT] ⚠ Grad-CAM returned None")
             except Exception as gcam_err:
                 print(f"[PREDICT] ✗ Grad-CAM failed: {gcam_err}")
 
-            # ── Segmentation overlay (Grad-CAM derived) ───────────
-            # Uses the Grad-CAM heatmap thresholded at 0.5 to produce
-            # a reliable yellow overlay across all tumour types.
-            # Falls back to U-Net if Grad-CAM segmentation fails.
-            try:
-                # Render segmentation on the preprocessed image resized back
-                # to original dimensions — NOT on image_np directly.
-                # The Grad-CAM heatmap is computed from `preprocessed`
-                # (128×128, brain fills full frame). image_np may have black
-                # borders or different proportions, causing coordinate mismatch.
-                import cv2 as _cv2
-                H_orig, W_orig = image_np.shape[:2]
-                canvas_for_seg = (
-                    _cv2.resize(
-                        preprocessed[0],
-                        (W_orig, H_orig),
-                        interpolation=_cv2.INTER_LINEAR,
-                    ) * 255
-                ).astype(np.uint8)
-
-                seg_b64 = generate_gradcam_segmentation(
-                    model          = classification_model,
-                    img_array      = preprocessed,
-                    class_idx      = predicted_class,
-                    original_image = canvas_for_seg,
-                    threshold      = 0.75,
-                )
-                if seg_b64:
-                    response["segment_image"]          = seg_b64
-                    response["segmentation_performed"] = True
-                    print("[PREDICT] ✓ Segmentation complete (Grad-CAM derived)")
-                else:
-                    raise ValueError("Grad-CAM segmentation returned None")
-            except Exception as seg_err:
-                print(f"[PREDICT] Grad-CAM seg failed ({seg_err}), trying U-Net fallback...")
+            # ── Pipeline B: Grad-CAM pseudo-segmentation ───────────
+            # Uses the already-computed raw_heatmap from Pipeline A.
+            # Thresholds the high-activation region to produce a
+            # tumour boundary overlay that is consistent with the
+            # classifier — same model, same image, no distribution mismatch.
+            if raw_heatmap is not None:
                 try:
-                    overlay_pil = inference_segmentation_with_overlay(
-                        image_np, segmentation_model
+                    buf = gradcam_pseudo_segmentation(
+                        image   = image_np,
+                        heatmap = raw_heatmap,
                     )
-                    buf = BytesIO()
-                    overlay_pil.save(buf, format="JPEG", quality=95)
                     buf.seek(0)
                     response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
                     response["segmentation_performed"] = True
-                    print("[PREDICT] ✓ Segmentation complete (U-Net fallback)")
-                except Exception as unet_err:
-                    print(f"[PREDICT] ✗ U-Net fallback also failed: {unet_err}")
+                    print("[PREDICT] ✓ Pseudo-segmentation complete")
+                except Exception as seg_err:
+                    print(f"[PREDICT] ✗ Pseudo-segmentation failed: {seg_err}")
 
         else:
-            print("[PREDICT] No tumour — skipping segmentation & Grad-CAM")
+            print("[PREDICT] No tumour — skipping visual analysis")
 
         # ── Step 4: LLM Report ────────────────────────────────────
         print("[PREDICT] Generating radiology report...")
@@ -286,7 +281,6 @@ def predict():
         return jsonify(response), 200
 
     except ValueError as ve:
-        # Raised by load_image() for bad/corrupt files
         print(f"[PREDICT] Bad file: {ve}")
         return jsonify({
             "error":   "Invalid file",

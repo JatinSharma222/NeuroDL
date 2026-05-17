@@ -9,7 +9,7 @@ from src.config import *
 
 # Configuration
 TEST_DATA_DIR = 'data/raw_dataset/Testing'  
-IMG_SIZE = 128  
+IMG_SIZE = 224  # Must match training configuration
 BATCH_SIZE = 32
 
 print("="*70)
