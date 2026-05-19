@@ -66,11 +66,6 @@ def _clean_mask(
     if num_labels <= 1:
         return mask
 
-    # Minimum area: component must cover at least 0.5% of the image.
-    # This eliminates tiny noise blobs and corner artifacts that slip
-    # through morphological opening.
-    min_area = int(H * W * 0.005)
-
     if gradcam_hint is not None:
         # ── Priority 1: closest centroid to Grad-CAM peak ─────────
         # The Grad-CAM heatmap encodes where the classifier focused.
@@ -86,12 +81,9 @@ def _clean_mask(
         best_id   = 1
         best_dist = float("inf")
         for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            if area < min_area:
-                print(f"[CleanMask] Component {i}: area={area} < min_area={min_area}, skipped")
-                continue
             cx, cy = centroids[i]
             dist   = (cx - peak_x) ** 2 + (cy - peak_y) ** 2
+            area   = stats[i, cv2.CC_STAT_AREA]
             print(f"[CleanMask] Component {i}: centroid=({cx:.0f},{cy:.0f}), "
                   f"dist²={dist:.0f}, area={area}")
             if dist < best_dist:
@@ -110,12 +102,8 @@ def _clean_mask(
         best_id    = 1
         best_score = -1.0
         for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            if area < min_area:
-                print(f"[CleanMask] Component {i}: area={area} < min_area={min_area}, skipped")
-                continue
             mean_score = float(scores[labels == i].mean())
-            print(f"[CleanMask] Component {i}: mean_score={mean_score:.4f}, area={area}")
+            print(f"[CleanMask] Component {i}: mean_score={mean_score:.4f}")
             if mean_score > best_score:
                 best_score = mean_score
                 best_id    = i
@@ -124,15 +112,10 @@ def _clean_mask(
         mask = (labels == best_id).astype(np.uint8)
 
     else:
-        # ── Fallback: largest area above minimum size ─────────────
-        best_id    = 1
-        best_area  = 0
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            if area >= min_area and area > best_area:
-                best_area = area
-                best_id   = i
-        mask = (labels == best_id).astype(np.uint8)
+        # ── Fallback: largest area ────────────────────────────────
+        areas      = stats[1:, cv2.CC_STAT_AREA]
+        largest_id = int(np.argmax(areas)) + 1
+        mask       = (labels == largest_id).astype(np.uint8)
 
     return mask
 
@@ -222,91 +205,151 @@ def overlay_mask_on_image(
     return buf
 
 
+# ─── Direct mask renderer (no _clean_mask re-selection) ──────────────────────
+
+def _render_mask_overlay(image: np.ndarray, mask: np.ndarray) -> BytesIO:
+    """
+    Render a pre-selected binary mask onto the image directly.
+    Does NOT call _clean_mask — mask is already the correct region.
+    """
+    H, W = image.shape[:2]
+
+    if mask.sum() == 0:
+        buf = BytesIO()
+        Image.fromarray(image).save(buf, format="JPEG", quality=95)
+        buf.seek(0)
+        return buf
+
+    canvas = image.astype(np.float32)
+
+    # Semi-transparent yellow fill
+    fill             = np.zeros_like(canvas)
+    fill[mask == 1]  = FILL_COLOR
+    mask_3ch         = mask[:, :, np.newaxis].astype(np.float32)
+    canvas           = canvas * (1 - mask_3ch * FILL_ALPHA) + fill * mask_3ch * FILL_ALPHA
+
+    # Orange border
+    contours, _      = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    border_layer     = np.zeros_like(canvas)
+    cv2.drawContours(border_layer, contours, -1, BORDER_COLOR, thickness=3)
+    border_gray      = cv2.drawContours(
+        np.zeros((H, W), dtype=np.uint8), contours, -1, 255, thickness=3
+    )
+    border_3ch       = border_gray[:, :, np.newaxis].astype(np.float32) / 255.0
+    canvas           = (
+        canvas * (1 - border_3ch * BORDER_ALPHA)
+        + border_layer * border_3ch * BORDER_ALPHA
+    )
+
+    result = np.clip(canvas, 0, 255).astype(np.uint8)
+    buf    = BytesIO()
+    Image.fromarray(result).save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    return buf
+
+
 # ─── Grad-CAM pseudo-segmentation ────────────────────────────────────────────
 
 def gradcam_pseudo_segmentation(
     image: np.ndarray,
     heatmap: np.ndarray,
-    top_percent: float = 20.0,
+    top_percent: float = 10.0,
 ) -> BytesIO:
     """
     Create a tumour region overlay from the Grad-CAM heatmap.
 
-    FIXES vs previous version:
-      1. Border masking (10% margin) — skull edges and image corners are
-         often bright in MRI and score highly in the top-20% threshold,
-         producing corner artifacts. Tumours are never at the very edge
-         of a skull MRI, so zeroing the border before thresholding is safe.
+    APPROACH — "contains peak pixel":
+      1. Resize + smooth heatmap to original image resolution
+      2. Zero out 10% border (eliminates skull/background artifacts)
+      3. Threshold at top-N percentile (10% = focused, not diffuse)
+      4. Select the connected component containing the peak pixel
+      5. If component > 25% of image, tighten threshold and retry
+      6. Light morphological closing (iterations=1) to fill holes
+      7. Render via _render_mask_overlay (skips _clean_mask entirely)
 
-      2. gradcam_hint instead of raw_scores for component selection —
-         raw_scores selected the component with the highest MEAN heatmap
-         value. A small corner artifact with uniformly high values easily
-         beats a larger diffuse tumour region. gradcam_hint selects the
-         component whose centroid is CLOSEST TO THE HEATMAP PEAK, which
-         is where the fine-tuned Grad-CAM actually points.
-
-    Args:
-        image       : (H, W, 3) uint8 RGB original image
-        heatmap     : (h, w) float32 Grad-CAM heatmap, values in [0, 1]
-        top_percent : Keep the top N% of activations (default 20%)
-
-    Returns:
-        BytesIO: JPEG-encoded overlaid image
+    Key design decisions:
+      - top_percent=10 (not 20): 20% creates regions large enough to
+        span brain tissue AND facial structures in sagittal views.
+        10% stays tightly focused around the true hotspot.
+      - "contains peak pixel" beats centroid/mean-score: the blob that
+        physically includes the Grad-CAM maximum IS the tumour region.
+      - Area cap (25%): if the selected region is unreasonably large,
+        tighten threshold until it's a plausible tumour size.
+      - _render_mask_overlay: skips the _clean_mask inside
+        overlay_mask_on_image which would redo component selection
+        and potentially select the wrong component again.
     """
     H, W = image.shape[:2]
 
-    # ── Resize heatmap to full image resolution ───────────────────
+    # ── 1. Resize to full image resolution ───────────────────────
     hm = cv2.resize(heatmap.astype(np.float32), (W, H),
                     interpolation=cv2.INTER_CUBIC)
     hm = np.clip(hm, 0.0, 1.0)
 
-    # ── Smooth to remove upsampling block artefacts ───────────────
+    # ── 2. Smooth to remove upsampling block artefacts ────────────
     sigma = min(H, W) / 50
-    k = int(sigma * 4) | 1
-    hm = cv2.GaussianBlur(hm, (k, k), sigmaX=sigma, sigmaY=sigma)
-    mx = hm.max()
+    k     = int(sigma * 4) | 1
+    hm    = cv2.GaussianBlur(hm, (k, k), sigmaX=sigma, sigmaY=sigma)
+    mx    = hm.max()
     if mx > 0:
         hm = hm / mx
 
-    # ── Border masking — zero out 10% margin ─────────────────────
-    # Skull edges and image corners produce bright MRI intensities that
-    # land in the top-20% threshold and become corner artifacts.
-    # Brain tumours are never at the very image boundary.
-    hm_masked = hm.copy()
-    my = int(H * 0.10)
-    mx_ = int(W * 0.10)
-    hm_masked[:my,   :]  = 0   # top edge
-    hm_masked[-my:,  :]  = 0   # bottom edge
-    hm_masked[:,  :mx_]  = 0   # left edge
-    hm_masked[:, -mx_:]  = 0   # right edge
-    print(f"[PseudoSeg] Border masked (10% margin = {my}px × {mx_}px)")
+    # ── 3. Zero out 10% border ────────────────────────────────────
+    hm_masked      = hm.copy()
+    by, bx         = int(H * 0.10), int(W * 0.10)
+    hm_masked[:by,  :]  = 0
+    hm_masked[-by:, :]  = 0
+    hm_masked[:,  :bx]  = 0
+    hm_masked[:, -bx:]  = 0
 
-    # ── Percentile threshold on border-masked heatmap ─────────────
-    # Compute percentile on non-zero values so the zeroed border
-    # doesn't push the threshold unrealistically low.
+    # ── 4. Percentile threshold on non-zero region ────────────────
     nonzero = hm_masked[hm_masked > 0]
-    if len(nonzero) > 0:
-        threshold = np.percentile(nonzero, 100 - top_percent)
-    else:
-        threshold = np.percentile(hm_masked, 100 - top_percent)
+    if len(nonzero) == 0:
+        hm_masked = hm.copy()
+        nonzero   = hm_masked[hm_masked > 0]
 
-    binary_mask = (hm_masked > threshold).astype(np.uint8)
-    coverage = binary_mask.mean()
-    print(f"[PseudoSeg] top {top_percent}% → threshold={threshold:.3f}, "
-          f"coverage={coverage*100:.1f}%")
+    def _threshold_and_select(pct):
+        """Return (selected_mask, area) for a given top_percent."""
+        t           = np.percentile(nonzero, 100 - pct)
+        bmask       = (hm_masked > t).astype(np.uint8)
+        nl, lb, st, _ = cv2.connectedComponentsWithStats(bmask, connectivity=8)
+        py, px      = np.unravel_index(np.argmax(hm_masked), hm_masked.shape)
+        pl          = int(lb[py, px])
+        if pl == 0 and nl > 1:
+            pl = int(np.argmax(st[1:, cv2.CC_STAT_AREA])) + 1
+        if pl == 0 or nl <= 1:
+            return None, 0
+        sel  = (lb == pl).astype(np.uint8)
+        return sel, sel.sum()
 
-    # ── Component selection: peak proximity (gradcam_hint) ────────
-    # Pass hm_masked as gradcam_hint so _clean_mask finds the heatmap
-    # peak and selects the connected component whose centroid is closest.
-    # This is correct: fine-tuned Grad-CAM peak = tumour location.
-    # Do NOT pass raw_scores — mean score selects the brightest small
-    # blob (corner artifact) rather than the correct tumour region.
-    binary_mask = _clean_mask(binary_mask, gradcam_hint=hm_masked)
+    # Start at top_percent, tighten if region is too large (>25% image)
+    max_area  = int(H * W * 0.25)
+    sel_mask, area = _threshold_and_select(top_percent)
 
-    print(f"[PseudoSeg] Final active pixels: "
-          f"{binary_mask.sum()} ({100 * binary_mask.mean():.1f}%)")
+    if sel_mask is None:
+        buf = BytesIO()
+        Image.fromarray(image).save(buf, format="JPEG", quality=95)
+        buf.seek(0)
+        return buf
 
-    return overlay_mask_on_image(image, binary_mask)
+    if area > max_area:
+        print(f"[PseudoSeg] Area {area/H/W*100:.1f}% too large, tightening...")
+        for pct in [7.0, 5.0, 3.0]:
+            m2, a2 = _threshold_and_select(pct)
+            if m2 is not None and a2 <= max_area:
+                sel_mask, area = m2, a2
+                print(f"[PseudoSeg] Tightened to {pct}% → area={a2/H/W*100:.1f}%")
+                break
+
+    print(f"[PseudoSeg] Final area: {area} px ({area/H/W*100:.1f}%)")
+
+    # ── 5. Light closing (iterations=1) ──────────────────────────
+    k_close      = max(7, min(H, W) // 40)
+    kernel       = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close))
+    sel_mask     = cv2.morphologyEx(sel_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # ── 6. Render — bypass _clean_mask ───────────────────────────
+    return _render_mask_overlay(image, sel_mask)
 
 
 # ─── Segmentation inference ───────────────────────────────────────────────────
