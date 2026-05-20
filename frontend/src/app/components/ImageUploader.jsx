@@ -5,15 +5,15 @@ import APIRequest from "./APIRequest";
 /**
  * ImageUploader.jsx
  * ─────────────────
- * Updated for NeuroDL v2.0.
+ * Step 2 of the diagnosis flow.
+ * Accepts patientId prop from InferenceForm and forwards it to APIRequest
+ * so the scan is saved linked to the correct patient.
  *
- * Changes vs v1.0:
- *   - File accept now includes .dcm (DICOM)
- *   - DICOM file shows a distinct icon + label
- *   - Max file size client-side guard (16 MB)
+ * Props:
+ *   patientId (int | null) — patient FK from /patients POST
  */
 
-const MAX_FILE_MB  = 16;
+const MAX_FILE_MB    = 16;
 const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 
 const SAMPLE_IMAGES = [
@@ -37,8 +37,7 @@ const SAMPLE_IMAGES = [
 const isDicom = (file) =>
   file?.name?.toLowerCase().endsWith(".dcm") || file?.type === "application/dicom";
 
-
-const ImageUploader = () => {
+const ImageUploader = ({ patientId = null }) => {
   const [selectedImage, setSelectedImage] = useState(null);
   const [sizeError,     setSizeError]     = useState("");
   const [isMounted,     setIsMounted]     = useState(false);
@@ -49,7 +48,9 @@ const ImageUploader = () => {
     setSizeError("");
     if (!file) return;
     if (file.size > MAX_FILE_BYTES) {
-      setSizeError(`File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max allowed: ${MAX_FILE_MB} MB.`);
+      setSizeError(
+        `File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max allowed: ${MAX_FILE_MB} MB.`
+      );
       return;
     }
     setSelectedImage(file);
@@ -88,44 +89,44 @@ const ImageUploader = () => {
         <h3 className="text-xl font-bold text-black mb-2">
           Try with Sample Images
         </h3>
-        <p style={{ fontSize:"0.85rem", color:"var(--color-text-light)", marginBottom:"var(--spacing-lg)" }}>
+        <p style={{ fontSize: "0.85rem", color: "var(--color-text-light)", marginBottom: "var(--spacing-lg)" }}>
           Real MRI scans from the test dataset — one click to analyse
         </p>
 
         {/* Class colour key */}
-        <div style={{ display:"flex", flexWrap:"wrap", gap:8, justifyContent:"center", marginBottom:"var(--spacing-lg)" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginBottom: "var(--spacing-lg)" }}>
           {[
-            { type:"glioma",     label:"Glioma",     color:"#fecaca", text:"#991b1b" },
-            { type:"meningioma", label:"Meningioma", color:"#fed7aa", text:"#9a3412" },
-            { type:"pituitary",  label:"Pituitary",  color:"#bbf7d0", text:"#14532d" },
-            { type:"notumor",    label:"No Tumor",   color:"#bfdbfe", text:"#1e3a8a" },
+            { type: "glioma",     label: "Glioma",     color: "#fecaca", text: "#991b1b" },
+            { type: "meningioma", label: "Meningioma", color: "#fed7aa", text: "#9a3412" },
+            { type: "pituitary",  label: "Pituitary",  color: "#bbf7d0", text: "#14532d" },
+            { type: "notumor",    label: "No Tumor",   color: "#bfdbfe", text: "#1e3a8a" },
           ].map(({ type, label, color, text }) => (
             <span key={type} style={{
-              display:"inline-flex", alignItems:"center", gap:5,
-              padding:"3px 10px", borderRadius:99,
-              background:color, color:text,
-              fontSize:"0.75rem", fontWeight:700,
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "3px 10px", borderRadius: 99,
+              background: color, color: text,
+              fontSize: "0.75rem", fontWeight: 700,
             }}>
-              <span style={{ width:7, height:7, borderRadius:"50%", background:text }} />
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: text }} />
               {label}
             </span>
           ))}
         </div>
 
-        {/* Image grid grouped by class */}
+        {/* Image grid */}
         <div style={{
-          display:"grid",
-          gridTemplateColumns:"repeat(4, 1fr)",
-          gap:"var(--spacing-sm)",
-          maxWidth:520,
-          margin:"0 auto",
+          display: "grid",
+          gridTemplateColumns: "repeat(4, 1fr)",
+          gap: "var(--spacing-sm)",
+          maxWidth: 520,
+          margin: "0 auto",
         }}>
           {SAMPLE_IMAGES.map((sample, index) => {
             const colorMap = {
-              glioma:     { bg:"#fecaca", border:"#f87171", text:"#991b1b" },
-              meningioma: { bg:"#fed7aa", border:"#fb923c", text:"#9a3412" },
-              pituitary:  { bg:"#bbf7d0", border:"#4ade80", text:"#14532d" },
-              notumor:    { bg:"#bfdbfe", border:"#60a5fa", text:"#1e3a8a" },
+              glioma:     { bg: "#fecaca", border: "#f87171", text: "#991b1b" },
+              meningioma: { bg: "#fed7aa", border: "#fb923c", text: "#9a3412" },
+              pituitary:  { bg: "#bbf7d0", border: "#4ade80", text: "#14532d" },
+              notumor:    { bg: "#bfdbfe", border: "#60a5fa", text: "#1e3a8a" },
             };
             const c = colorMap[sample.type] || colorMap.notumor;
             return (
@@ -134,12 +135,12 @@ const ImageUploader = () => {
                 onClick={() => handleSampleClick(sample.src)}
                 title={`${sample.label} — click to analyse`}
                 style={{
-                  cursor:"pointer",
-                  borderRadius:"var(--radius-md, 10px)",
-                  overflow:"hidden",
-                  border:`2px solid ${c.border}`,
-                  transition:"transform 0.15s, box-shadow 0.15s",
-                  background:"#000",
+                  cursor: "pointer",
+                  borderRadius: "var(--radius-md, 10px)",
+                  overflow: "hidden",
+                  border: `2px solid ${c.border}`,
+                  transition: "transform 0.15s, box-shadow 0.15s",
+                  background: "#000",
                 }}
                 onMouseEnter={e => {
                   e.currentTarget.style.transform = "scale(1.05)";
@@ -150,23 +151,18 @@ const ImageUploader = () => {
                   e.currentTarget.style.boxShadow = "none";
                 }}
               >
-                {/* Image */}
-                <div style={{ aspectRatio:"1/1", overflow:"hidden" }}>
+                <div style={{ aspectRatio: "1/1", overflow: "hidden" }}>
                   <img
                     src={sample.src}
                     alt={sample.label}
-                    style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }}
+                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                   />
                 </div>
-                {/* Label chip */}
                 <div style={{
-                  background:c.bg,
-                  color:c.text,
-                  fontSize:"0.62rem",
-                  fontWeight:700,
-                  textAlign:"center",
-                  padding:"3px 4px",
-                  letterSpacing:"0.02em",
+                  background: c.bg, color: c.text,
+                  fontSize: "0.62rem", fontWeight: 700,
+                  textAlign: "center", padding: "3px 4px",
+                  letterSpacing: "0.02em",
                 }}>
                   {sample.label}
                 </div>
@@ -198,13 +194,11 @@ const ImageUploader = () => {
               <div className="fade-in">
                 <div className="upload-icon">
                   {isDicom(selectedImage) ? (
-                    /* DICOM icon */
                     <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                         d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />
                     </svg>
                   ) : (
-                    /* Checkmark icon */
                     <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                     </svg>
@@ -217,16 +211,14 @@ const ImageUploader = () => {
 
                 <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap", marginBottom: 8 }}>
                   {isDicom(selectedImage) && (
-                    <span className="badge badge-info" style={{ fontSize: "0.75rem" }}>
-                      DICOM
-                    </span>
+                    <span className="badge badge-info" style={{ fontSize: "0.75rem" }}>DICOM</span>
                   )}
                   <span
                     className="badge"
                     style={{
                       background: "var(--color-bg-tertiary)",
-                      color: "var(--color-text-secondary)",
-                      fontSize: "0.75rem",
+                      color:      "var(--color-text-secondary)",
+                      fontSize:   "0.75rem",
                     }}
                   >
                     {(selectedImage.size / 1024).toFixed(0)} KB
@@ -267,9 +259,9 @@ const ImageUploader = () => {
         )}
       </div>
 
-      {/* ── Analysis ── */}
+      {/* ── Analysis — pass patientId to APIRequest ── */}
       {selectedImage && !sizeError && (
-        <APIRequest image={selectedImage} />
+        <APIRequest image={selectedImage} patientId={patientId} />
       )}
     </div>
   );

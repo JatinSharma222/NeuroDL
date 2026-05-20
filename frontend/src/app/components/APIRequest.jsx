@@ -9,39 +9,37 @@ import { useToast } from "@chakra-ui/react";
 /**
  * APIRequest.jsx
  * ──────────────
- * Updated for NeuroDL v2.0.
+ * NeuroDL v2.0 — sends MRI to /predict with patient_id from PatientForm.
  *
- * Changes vs v1.0:
- *   - patient_id text input added to the form
- *   - Sends patient_id as FormData field to /predict
- *   - Renders HeatmapViewer (Grad-CAM + segmentation)
- *   - Renders ReportPanel (Ollama LLM report)
- *   - Displays scan_id after successful prediction
- *   - gradcam_performed badge in the metadata row
+ * Props:
+ *   image     (File)       — selected MRI file
+ *   patientId (int | null) — FK from /patients, forwarded as form field
+ *
+ * Note: patient_id text input removed — patient is now registered in
+ * Step 1 via PatientForm before reaching this component.
  */
 
-const APIRequest = ({ image }) => {
-  const [response,    setResponse]    = useState(null);
-  const [loading,     setLoading]     = useState(false);
-  const [patientId,   setPatientId]   = useState("");
+const APIRequest = ({ image, patientId = null }) => {
+  const [response, setResponse] = useState(null);
+  const [loading,  setLoading]  = useState(false);
   const toast = useToast();
 
-  // ── Hardcoded tumour info (shown below the report) ────────────
+  // ── Tumour info shown below the LLM report ────────────────────
   const tumorInfo = {
     0: {
-      name: "Glioma Tumor",
+      name:    "Glioma Tumor",
       content: `## Glioma Tumor\n\n**Description**: Aggressive malignant brain tumor from glial cells requiring multi-modal treatment.\n\n**Action**: Consult neurosurgeon and oncologist immediately for personalized treatment plan.\n\n**Implications**: May cause seizures, cognitive difficulties, and functional impairment.`,
     },
     1: {
-      name: "Meningioma Tumor",
+      name:    "Meningioma Tumor",
       content: `## Meningioma Tumor\n\n**Description**: Usually benign tumor from protective brain layers. 90% are non-cancerous.\n\n**Action**: Consult neurosurgeon for evaluation. Regular MRI monitoring recommended.\n\n**Implications**: May cause headaches, vision problems, and neurological symptoms if untreated.`,
     },
     2: {
-      name: "No Tumor",
+      name:    "No Tumor",
       content: `## No Tumor Detected\n\n**Description**: No abnormal growths identified. Healthy brain tissue with normal structures.\n\n**Action**: Maintain regular health check-ups as advised by your healthcare provider.\n\n**Note**: If experiencing symptoms, consult your doctor for comprehensive evaluation.`,
     },
     3: {
-      name: "Pituitary Tumor",
+      name:    "Pituitary Tumor",
       content: `## Pituitary Tumor\n\n**Description**: Usually benign adenoma affecting pituitary gland and hormone production.\n\n**Action**: Consult endocrinologist for hormonal evaluation and treatment options.\n\n**Implications**: May cause vision changes, hormonal imbalances, and headaches.`,
     },
   };
@@ -50,8 +48,10 @@ const APIRequest = ({ image }) => {
   const sendRequest = async () => {
     const formData = new FormData();
     formData.append("image", image);
-    if (patientId.trim()) {
-      formData.append("patient_id", patientId.trim());
+
+    // Send patient_id as integer string so Flask can parse it
+    if (patientId !== null && patientId !== undefined) {
+      formData.append("patient_id", String(patientId));
     }
 
     setLoading(true);
@@ -98,69 +98,6 @@ const APIRequest = ({ image }) => {
   return (
     <div className="space-y-8 mt-8">
 
-      {/* ── Patient ID input ── */}
-      <div
-        style={{
-          background:   "var(--color-bg-secondary)",
-          borderRadius: "var(--radius-md)",
-          padding:      "var(--spacing-lg)",
-          border:       "1px solid var(--color-border-light)",
-        }}
-      >
-        <label
-          htmlFor="patient-id"
-          style={{
-            display:      "block",
-            fontWeight:   700,
-            fontSize:     "0.9rem",
-            marginBottom: "var(--spacing-xs)",
-            color:        "var(--color-text-primary)",
-          }}
-        >
-          Patient ID
-          <span
-            style={{
-              fontWeight: 400,
-              color:      "var(--color-text-light)",
-              marginLeft: 6,
-            }}
-          >
-            (optional)
-          </span>
-        </label>
-        <input
-          id="patient-id"
-          type="text"
-          value={patientId}
-          onChange={(e) => setPatientId(e.target.value)}
-          placeholder="e.g. PT-00123"
-          maxLength={100}
-          style={{
-            width:        "100%",
-            maxWidth:     340,
-            padding:      "10px 14px",
-            border:       "1px solid var(--color-border)",
-            borderRadius: "var(--radius-sm)",
-            fontSize:     "0.9rem",
-            outline:      "none",
-            background:   "white",
-            color:        "var(--color-text-primary)",
-          }}
-          onFocus={(e)  => (e.target.style.borderColor = "var(--color-primary)")}
-          onBlur={(e)   => (e.target.style.borderColor = "var(--color-border)")}
-          disabled={loading}
-        />
-        <p
-          style={{
-            margin:    "6px 0 0",
-            fontSize:  "0.78rem",
-            color:     "var(--color-text-light)",
-          }}
-        >
-          Saved with the scan record in history.
-        </p>
-      </div>
-
       {/* ── Analyse button ── */}
       <div className="text-center">
         <button
@@ -183,6 +120,13 @@ const APIRequest = ({ image }) => {
             </span>
           )}
         </button>
+
+        {/* Patient linkage note */}
+        {patientId && (
+          <p style={{ marginTop: 8, fontSize: "0.78rem", color: "var(--color-text-light)" }}>
+            Result will be saved under Patient #{patientId}
+          </p>
+        )}
       </div>
 
       {/* ── Results ── */}
@@ -211,14 +155,10 @@ const APIRequest = ({ image }) => {
                 Accuracy: {response.model_accuracy}
               </span>
               {response.gradcam_performed && (
-                <span className="badge badge-success">
-                  ✓ Grad-CAM
-                </span>
+                <span className="badge badge-success">✓ Grad-CAM</span>
               )}
               {response.segmentation_performed && (
-                <span className="badge badge-info">
-                  ✓ Segmentation
-                </span>
+                <span className="badge badge-info">✓ Segmentation</span>
               )}
               {response.scan_id && (
                 <span
@@ -231,10 +171,22 @@ const APIRequest = ({ image }) => {
                   Scan #{response.scan_id}
                 </span>
               )}
+              {response.patient_id && (
+                <span
+                  className="badge"
+                  style={{
+                    background: "#f0fdf4",
+                    color:      "#15803d",
+                    border:     "1px solid #bbf7d0",
+                  }}
+                >
+                  Patient #{response.patient_id}
+                </span>
+              )}
             </div>
           </div>
 
-          {/* ── Heatmap Viewer (replaces old two-card result-container) ── */}
+          {/* Heatmap viewer */}
           <HeatmapViewer
             image        ={image}
             gradcamImage ={response.gradcam_image}
@@ -242,20 +194,17 @@ const APIRequest = ({ image }) => {
             className    ={response.class_name}
           />
 
-          {/* ── LLM Report Panel ── */}
-          <ReportPanel
-            report  ={response.report}
-            loading ={false}
-          />
+          {/* LLM Report */}
+          <ReportPanel report={response.report} loading={false} />
 
-          {/* ── Tumour info (markdown) ── */}
+          {/* Tumour info markdown */}
           {response._info && (
             <div className="info-section markdown-content">
               <ReactMarkdown>{response._info}</ReactMarkdown>
             </div>
           )}
 
-          {/* ── Medical disclaimer ── */}
+          {/* Medical disclaimer */}
           <div className="alert alert-warning">
             <svg className="w-6 h-6 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd"
