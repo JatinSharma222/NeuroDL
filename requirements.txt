@@ -1,27 +1,28 @@
 # ─── Core Framework ───────────────────────────────────────────────
 Flask==3.0.3
 Flask-Cors==4.0.0
-gunicorn>=21.0.0
+gunicorn==25.3.0
 
 # ─── ML / Deep Learning ───────────────────────────────────────────
-tensorflow>=2.12.0
-tf-keras-vis>=0.8.0
+tensorflow==2.16.2
+keras==3.14.0
+h5py==3.14.0
 
 # ─── Image Processing ─────────────────────────────────────────────
-numpy>=1.26.4
-Pillow>=10.0.0
-scikit-image>=0.21.0
-opencv-python-headless>=4.8.0
+numpy==1.26.4
+pillow==12.2.0
+scikit-image==0.26.0
+opencv-python-headless==4.13.0.92
+scipy==1.17.1
 
-# ─── DICOM Support (Upgrade 2) ────────────────────────────────────
-pydicom>=2.4.0
+# ─── DICOM Support ────────────────────────────────────────────────
+pydicom==3.0.2
 
-# ─── LLM Report Generation (Upgrade 3) ───────────────────────────
-anthropic>=0.20.0
+# ─── LLM Report Generation (Ollama via HTTP) ──────────────────────
+requests==2.33.1
 
-# ─── Database / Scan History (Upgrade 4) ─────────────────────────
-SQLAlchemy>=2.0.0
+# ─── Database / Scan History ──────────────────────────────────────
+SQLAlchemy==2.0.49
 
 # ─── Environment & Utilities ──────────────────────────────────────
-python-dotenv>=1.0.0
-Requests>=2.31.0
+python-dotenv==1.2.2
