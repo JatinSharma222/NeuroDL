@@ -314,17 +314,24 @@ def predict():
 
         # ── Step 4: LLM Report ────────────────────────────────────
         try:
+            # Fetch full patient record so report can be personalised
+            patient_record = get_patient_by_id(patient_id) if patient_id else None
+
             report_text = generate_report(
                 class_name             = class_name,
                 confidence             = confidence,
                 segmentation_performed = response["segmentation_performed"],
                 gradcam_performed      = response["gradcam_performed"],
                 model_accuracy         = "94.92%",
-                patient_id             = str(patient_id) if patient_id else None,
+                patient_id             = patient_id,
+                patient_name           = patient_record.get("name")     if patient_record else None,
+                patient_age            = patient_record.get("age")      if patient_record else None,
+                patient_gender         = patient_record.get("gender")   if patient_record else None,
+                patient_symptoms       = patient_record.get("symptoms") if patient_record else None,
             )
             response["report"] = report_text
             if report_text:
-                print("[PREDICT] ✓ Report generated")
+                print(f"[PREDICT] ✓ Report generated ({len(report_text)} chars)")
         except Exception as rep_err:
             print(f"[PREDICT] ✗ Report failed: {rep_err}")
 
