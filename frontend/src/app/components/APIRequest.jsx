@@ -5,26 +5,24 @@ import Loader from "./Loader";
 import HeatmapViewer from "./HeatmapViewer";
 import ReportPanel from "./ReportPanel";
 import { useToast } from "@chakra-ui/react";
+import { useAuth } from "../context/AuthContext";
 
 /**
  * APIRequest.jsx
  * ──────────────
- * NeuroDL v2.0 — sends MRI to /predict with patient_id from PatientForm.
+ * NeuroDL v2.0 — sends MRI to /predict with JWT auth and patient_id.
  *
  * Props:
  *   image     (File)       — selected MRI file
  *   patientId (int | null) — FK from /patients, forwarded as form field
- *
- * Note: patient_id text input removed — patient is now registered in
- * Step 1 via PatientForm before reaching this component.
  */
 
 const APIRequest = ({ image, patientId = null }) => {
+  const { authFetch } = useAuth();
   const [response, setResponse] = useState(null);
   const [loading,  setLoading]  = useState(false);
   const toast = useToast();
 
-  // ── Tumour info shown below the LLM report ────────────────────
   const tumorInfo = {
     0: {
       name:    "Glioma Tumor",
@@ -44,12 +42,9 @@ const APIRequest = ({ image, patientId = null }) => {
     },
   };
 
-  // ── Send prediction request ───────────────────────────────────
   const sendRequest = async () => {
     const formData = new FormData();
     formData.append("image", image);
-
-    // Send patient_id as integer string so Flask can parse it
     if (patientId !== null && patientId !== undefined) {
       formData.append("patient_id", String(patientId));
     }
@@ -59,7 +54,10 @@ const APIRequest = ({ image, patientId = null }) => {
 
     try {
       const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
-      const res = await fetch(`${API_URL}/predict`, {
+
+      // authFetch adds Authorization: Bearer <token> automatically
+      // Do NOT set Content-Type manually — browser sets it with FormData boundary
+      const res = await authFetch(`${API_URL}/predict`, {
         method: "POST",
         body:   formData,
       });
@@ -82,7 +80,6 @@ const APIRequest = ({ image, patientId = null }) => {
     } catch (error) {
       console.error("Analysis error:", error);
       setResponse({ error: error.message });
-
       toast({
         title:       "Analysis Failed",
         description: error.message,
@@ -121,7 +118,6 @@ const APIRequest = ({ image, patientId = null }) => {
           )}
         </button>
 
-        {/* Patient linkage note */}
         {patientId && (
           <p style={{ marginTop: 8, fontSize: "0.78rem", color: "var(--color-text-light)" }}>
             Result will be saved under Patient #{patientId}
@@ -161,25 +157,12 @@ const APIRequest = ({ image, patientId = null }) => {
                 <span className="badge badge-info">✓ Segmentation</span>
               )}
               {response.scan_id && (
-                <span
-                  className="badge"
-                  style={{
-                    background: "var(--color-bg-tertiary)",
-                    color:      "var(--color-text-secondary)",
-                  }}
-                >
+                <span className="badge" style={{ background: "var(--color-bg-tertiary)", color: "var(--color-text-secondary)" }}>
                   Scan #{response.scan_id}
                 </span>
               )}
               {response.patient_id && (
-                <span
-                  className="badge"
-                  style={{
-                    background: "#f0fdf4",
-                    color:      "#15803d",
-                    border:     "1px solid #bbf7d0",
-                  }}
-                >
+                <span className="badge" style={{ background: "#f0fdf4", color: "#15803d", border: "1px solid #bbf7d0" }}>
                   Patient #{response.patient_id}
                 </span>
               )}
