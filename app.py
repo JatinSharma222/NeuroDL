@@ -111,17 +111,6 @@ def home():
 
 @app.route("/auth/register", methods=["POST"])
 def register():
-    """
-    Register a new patient account.
-
-    Body (JSON):
-      full_name (required)
-      email     (required)
-      password  (required, min 8 chars)
-
-    Returns:
-      { token, user }
-    """
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "JSON body required"}), 400
@@ -130,7 +119,6 @@ def register():
     email     = data.get("email",     "").strip()
     password  = data.get("password",  "")
 
-    # Validation
     errors = []
     if not full_name:
         errors.append("Full name is required")
@@ -160,25 +148,14 @@ def register():
         }), 201
 
     except ValueError as ve:
-        # Email already registered
         return jsonify({"error": str(ve)}), 409
-    except Exception as e:
+    except Exception:
         print(f"[AUTH] Register error: {traceback.format_exc()}")
         return jsonify({"error": "Registration failed"}), 500
 
 
 @app.route("/auth/login", methods=["POST"])
 def login():
-    """
-    Authenticate an existing patient account.
-
-    Body (JSON):
-      email    (required)
-      password (required)
-
-    Returns:
-      { token, user }
-    """
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "JSON body required"}), 400
@@ -213,9 +190,8 @@ def login():
 @app.route("/auth/me", methods=["GET"])
 @require_auth
 def me(current_user):
-    """Return the currently authenticated user's profile."""
     return jsonify({
-        "id":        current_user["sub"],
+        "id":        int(current_user["sub"]),
         "email":     current_user["email"],
         "full_name": current_user["full_name"],
     }), 200
@@ -226,16 +202,6 @@ def me(current_user):
 @app.route("/patients", methods=["POST"])
 @require_auth
 def register_patient(current_user):
-    """
-    Register a patient profile for this session.
-
-    Body (JSON):
-      name     (required)
-      age      (required)
-      gender   (required)
-      phone    (optional)
-      symptoms (optional)
-    """
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "JSON body required"}), 400
@@ -263,7 +229,7 @@ def register_patient(current_user):
             gender   = gender,
             phone    = data.get("phone"),
             symptoms = data.get("symptoms"),
-            user_id  = current_user["sub"],   # link to logged-in user
+            user_id  = int(current_user["sub"]),   # ← sub is now string, cast to int
         )
         print(f"[PATIENT] Registered — id={patient_id}, user={current_user['email']}")
         return jsonify({
@@ -278,7 +244,6 @@ def register_patient(current_user):
 @app.route("/patients", methods=["GET"])
 @require_auth
 def list_patients(current_user):
-    """Return paginated patient list scoped to the logged-in user."""
     try:
         page     = max(1, int(request.args.get("page",     1)))
         per_page = max(1, min(int(request.args.get("per_page", 20)), 100))
@@ -287,7 +252,7 @@ def list_patients(current_user):
             page     = page,
             per_page = per_page,
             search   = search,
-            user_id  = current_user["sub"],
+            user_id  = int(current_user["sub"]),   # ← cast to int
         )
         return jsonify(result), 200
     except ValueError:
@@ -299,13 +264,11 @@ def list_patients(current_user):
 @app.route("/patients/<int:patient_id>", methods=["GET"])
 @require_auth
 def patient_detail(current_user, patient_id):
-    """Return a single patient record."""
     try:
         patient = get_patient_by_id(patient_id)
         if not patient:
             return jsonify({"error": f"Patient {patient_id} not found"}), 404
-        # Ensure the patient belongs to the logged-in user
-        if patient.get("user_id") != current_user["sub"]:
+        if patient.get("user_id") != int(current_user["sub"]):   # ← cast to int
             return jsonify({"error": "Forbidden"}), 403
         return jsonify(patient), 200
     except Exception:
@@ -315,12 +278,11 @@ def patient_detail(current_user, patient_id):
 @app.route("/patients/<int:patient_id>", methods=["DELETE"])
 @require_auth
 def patient_delete(current_user, patient_id):
-    """Delete a patient and their linked scan."""
     try:
         patient = get_patient_by_id(patient_id)
         if not patient:
             return jsonify({"error": f"Patient {patient_id} not found"}), 404
-        if patient.get("user_id") != current_user["sub"]:
+        if patient.get("user_id") != int(current_user["sub"]):   # ← cast to int
             return jsonify({"error": "Forbidden"}), 403
         delete_patient(patient_id)
         return jsonify({"message": f"Patient {patient_id} deleted"}), 200
@@ -333,13 +295,6 @@ def patient_delete(current_user, patient_id):
 @app.route("/predict", methods=["POST"])
 @require_auth
 def predict(current_user):
-    """
-    Main MRI analysis endpoint.
-
-    Multipart form:
-      image      (required) — JPEG / PNG / DICOM
-      patient_id (optional) — int FK from /patients
-    """
     if "image" not in request.files:
         return jsonify({"error": "No image provided"}), 400
 
@@ -476,7 +431,6 @@ def predict(current_user):
 @app.route("/history", methods=["GET"])
 @require_auth
 def history(current_user):
-    """Paginated scan history scoped to the logged-in user."""
     try:
         result = get_scans(
             page       = max(1, int(request.args.get("page",     1))),
@@ -484,7 +438,7 @@ def history(current_user):
             class_name = request.args.get("class_name"),
             date_from  = request.args.get("date_from"),
             date_to    = request.args.get("date_to"),
-            user_id    = current_user["sub"],
+            user_id    = int(current_user["sub"]),   # ← cast to int
         )
         return jsonify(result), 200
     except ValueError:

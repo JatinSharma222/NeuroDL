@@ -10,9 +10,6 @@ Handles:
 
 Environment variables:
   SECRET_KEY : JWT signing secret (required in production)
-
-Usage:
-  from src.auth import hash_password, verify_password, create_token, require_auth
 """
 
 import os
@@ -26,39 +23,20 @@ from flask import jsonify, request
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-SECRET_KEY     = os.environ.get("SECRET_KEY", "neurodl-dev-secret-change-in-production")
-JWT_ALGORITHM  = "HS256"
-JWT_EXPIRES_HRS = 24   # Token valid for 24 hours
+SECRET_KEY      = os.environ.get("SECRET_KEY", "neurodl-dev-secret-change-in-production")
+JWT_ALGORITHM   = "HS256"
+JWT_EXPIRES_HRS = 24
 
 
 # ─── Password Helpers ─────────────────────────────────────────────────────────
 
 def hash_password(plain: str) -> str:
-    """
-    Hash a plain-text password with bcrypt.
-
-    Args:
-        plain : Raw password string from registration form
-
-    Returns:
-        str: bcrypt hash string (safe to store in DB)
-    """
     salt   = bcrypt.gensalt(rounds=12)
     hashed = bcrypt.hashpw(plain.encode("utf-8"), salt)
     return hashed.decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """
-    Check a plain password against a stored bcrypt hash.
-
-    Args:
-        plain  : Raw password from login form
-        hashed : bcrypt hash string from DB
-
-    Returns:
-        bool: True if password matches
-    """
     try:
         return bcrypt.checkpw(
             plain.encode("utf-8"),
@@ -72,25 +50,12 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_token(user_id: int, email: str, full_name: str) -> str:
     """
-    Create a signed JWT for an authenticated user.
-
-    Payload:
-      sub       : user_id (int)
-      email     : user email
-      full_name : display name
-      iat       : issued at
-      exp       : expiry (24h from now)
-
-    Args:
-        user_id   : User primary key
-        email     : User email address
-        full_name : User display name
-
-    Returns:
-        str: Signed JWT string
+    Create a signed JWT.
+    sub is stored as a STRING — PyJWT requires sub to be a string.
+    Cast back to int with int(current_user["sub"]) when needed.
     """
     payload = {
-        "sub":       user_id,
+        "sub":       str(user_id),   # ← must be string for PyJWT
         "email":     email,
         "full_name": full_name,
         "iat":       datetime.utcnow(),
@@ -100,15 +65,6 @@ def create_token(user_id: int, email: str, full_name: str) -> str:
 
 
 def decode_token(token: str) -> dict | None:
-    """
-    Decode and validate a JWT.
-
-    Args:
-        token : Raw JWT string (without 'Bearer ' prefix)
-
-    Returns:
-        dict: Decoded payload, or None if invalid / expired
-    """
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
@@ -123,14 +79,6 @@ def decode_token(token: str) -> dict | None:
 
 
 def get_token_from_request() -> str | None:
-    """
-    Extract JWT from the Authorization header.
-
-    Expects:   Authorization: Bearer <token>
-
-    Returns:
-        str: Raw token string, or None if header is missing / malformed
-    """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         return None
@@ -142,21 +90,10 @@ def get_token_from_request() -> str | None:
 def require_auth(f):
     """
     Flask route decorator — blocks unauthenticated requests.
+    Injects decoded JWT payload as current_user into the route.
 
-    Extracts the JWT from the Authorization header, decodes it,
-    and injects the decoded payload into the route as `current_user`.
-
-    Usage:
-        @app.route("/predict", methods=["POST"])
-        @require_auth
-        def predict(current_user):
-            user_id = current_user["sub"]
-            ...
-
-    Returns 401 if:
-      - Authorization header is missing
-      - Token is malformed
-      - Token is expired
+    Note: current_user["sub"] is a STRING — cast to int where needed:
+        user_id = int(current_user["sub"])
     """
     @wraps(f)
     def decorated(*args, **kwargs):
