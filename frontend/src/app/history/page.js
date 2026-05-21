@@ -2,6 +2,7 @@
 import React from "react";
 import Link from "next/link";
 import HistoryTable from "../components/HistoryTable";
+import ProtectedRoute from "./components/ProtectedRoute";
 
 /**
  * history/page.js
@@ -15,6 +16,7 @@ import HistoryTable from "../components/HistoryTable";
 
 const HistoryPage = () => {
   return (
+    <ProtectedRoute>
     <div className="min-h-screen bg-gray-50">
 
       {/* ── Page Header ── */}
@@ -181,6 +183,7 @@ const HistoryPage = () => {
         </div>
       </section>
     </div>
+    </ProtectedRoute>
   );
 };
 

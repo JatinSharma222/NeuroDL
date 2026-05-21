@@ -1,8 +1,10 @@
 "use client";
 import InferenceForm from "./components/InferenceForm";
+import ProtectedRoute from "./components/ProtectedRoute";
 
 const HomePage = () => {
   return (
+    <ProtectedRoute>
     <div className="min-h-screen bg-white">
       {/* Hero Section */}
       <section className="pt-32 pb-20 bg-white">
@@ -237,6 +239,7 @@ const HomePage = () => {
         </div>
       </section>
     </div>
+    </ProtectedRoute>
   );
 };
 
