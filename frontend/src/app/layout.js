@@ -4,6 +4,7 @@ import Navbar from "./components/Navbar";
 import Footer from "./components/Footer";
 import { Analytics } from "@vercel/analytics/react";
 import { ChakraProvider } from "@chakra-ui/react";
+import { AuthProvider } from "./context/AuthContext";
 
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
@@ -18,9 +19,9 @@ const geistMono = localFont({
 });
 
 export const metadata = {
-  title: "NeuroDL - AI Brain Tumor Detection",
-  description: 'Advanced deep learning platform for brain tumor detection and classification from MRI scans. 84.13% accuracy with ResNet50V2.',
-  keywords: 'brain tumor, AI, deep learning, medical imaging, MRI analysis, tumor detection',
+  title:       "NeuroDL - AI Brain Tumor Detection",
+  description: "Advanced deep learning platform for brain tumor detection and classification from MRI scans.",
+  keywords:    "brain tumor, AI, deep learning, medical imaging, MRI analysis",
 };
 
 export default function RootLayout({ children }) {
@@ -36,9 +37,11 @@ export default function RootLayout({ children }) {
       >
         <Analytics />
         <ChakraProvider>
-          <Navbar />
-          {children}
-          <Footer />
+          <AuthProvider>
+            <Navbar />
+            {children}
+            <Footer />
+          </AuthProvider>
         </ChakraProvider>
       </body>
     </html>

@@ -2,31 +2,20 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-
-/**
- * Navbar.jsx
- * ──────────
- * Updated for NeuroDL v2.0.
- *
- * Changes vs v1.0:
- *   - History link added
- *   - Active route highlighting
- *   - Mobile hamburger menu
- */
+import { useAuth } from "../context/AuthContext";
 
 export default function Navbar() {
   const pathname              = usePathname();
+  const { user, logout }      = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
 
-  // Shadow on scroll
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 10);
     window.addEventListener("scroll", onScroll);
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Close menu on route change
   useEffect(() => { setMenuOpen(false); }, [pathname]);
 
   const isHistory = pathname === "/history";
@@ -35,7 +24,7 @@ export default function Navbar() {
     <nav
       className="fixed top-0 inset-x-0 z-50 bg-white border-b border-gray-100"
       style={{
-        boxShadow: scrolled ? "var(--shadow-md)" : "none",
+        boxShadow:  scrolled ? "var(--shadow-md)" : "none",
         transition: "box-shadow var(--transition-base)",
       }}
     >
@@ -60,38 +49,84 @@ export default function Navbar() {
 
           {/* ── Desktop nav ── */}
           <div className="hidden md:flex items-center gap-6">
+            {user ? (
+              <>
+                {/* Scan History link */}
+                <Link
+                  href="/history"
+                  className="flex items-center gap-1.5 text-sm font-semibold transition-colors"
+                  style={{ color: isHistory ? "var(--color-primary)" : "var(--color-text-secondary)" }}
+                >
+                  <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                  Scan History
+                  {isHistory && (
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--color-primary)", display: "inline-block" }} />
+                  )}
+                </Link>
 
-            {/* History link */}
-            <Link
-              href="/history"
-              className="flex items-center gap-1.5 text-sm font-semibold transition-colors"
-              style={{
-                color: isHistory
-                  ? "var(--color-primary)"
-                  : "var(--color-text-secondary)",
-              }}
-            >
-              <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-              </svg>
-              Scan History
-              {isHistory && (
-                <span
-                  style={{
-                    width: 6, height: 6,
-                    borderRadius: "50%",
-                    background: "var(--color-primary)",
-                    display: "inline-block",
-                  }}
-                />
-              )}
-            </Link>
+                {/* Analyse CTA */}
+                <a href="/#analyze" className="btn btn-primary">
+                  Analyse Scan
+                </a>
 
-            {/* Analyse CTA */}
-            <a href="/#analyze" className="btn btn-primary">
-              Analyse Scan
-            </a>
+                {/* User avatar + name + logout */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {/* Avatar */}
+                  <div
+                    style={{
+                      width:          36,
+                      height:         36,
+                      borderRadius:   "50%",
+                      background:     "linear-gradient(135deg, var(--color-primary), var(--color-primary-hover))",
+                      display:        "flex",
+                      alignItems:     "center",
+                      justifyContent: "center",
+                      color:          "white",
+                      fontWeight:     700,
+                      fontSize:       "0.9rem",
+                      flexShrink:     0,
+                    }}
+                  >
+                    {user.full_name?.charAt(0).toUpperCase() || "U"}
+                  </div>
+
+                  {/* Name */}
+                  <span style={{ fontSize: "0.875rem", fontWeight: 600, color: "var(--color-text-primary)", maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {user.full_name}
+                  </span>
+
+                  {/* Logout */}
+                  <button
+                    onClick={logout}
+                    className="btn btn-ghost btn-sm"
+                    style={{ fontSize: "0.8rem", color: "var(--color-text-light)" }}
+                    title="Sign out"
+                  >
+                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                    </svg>
+                    Sign out
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  className="text-sm font-semibold"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
+                  Sign In
+                </Link>
+                <Link href="/register" className="btn btn-primary">
+                  Get Started
+                </Link>
+              </>
+            )}
           </div>
 
           {/* ── Mobile hamburger ── */}
@@ -115,25 +150,53 @@ export default function Navbar() {
 
       {/* ── Mobile menu ── */}
       {menuOpen && (
-        <div
-          className="md:hidden border-t border-gray-100 bg-white"
-          style={{ padding: "var(--spacing-md) var(--spacing-lg)" }}
-        >
+        <div className="md:hidden border-t border-gray-100 bg-white" style={{ padding: "var(--spacing-md) var(--spacing-lg)" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--spacing-sm)" }}>
-            <Link
-              href="/history"
-              className="flex items-center gap-2 py-2 text-sm font-semibold"
-              style={{ color: isHistory ? "var(--color-primary)" : "var(--color-text-secondary)" }}
-            >
-              <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-              </svg>
-              Scan History
-            </Link>
-            <a href="/#analyze" className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }}>
-              Analyse Scan
-            </a>
+            {user ? (
+              <>
+                {/* User info */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "var(--spacing-sm) 0", borderBottom: "1px solid var(--color-border-light)", marginBottom: "var(--spacing-sm)" }}>
+                  <div style={{
+                    width: 36, height: 36, borderRadius: "50%",
+                    background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-hover))",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    color: "white", fontWeight: 700, fontSize: "0.9rem",
+                  }}>
+                    {user.full_name?.charAt(0).toUpperCase() || "U"}
+                  </div>
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 700, fontSize: "0.9rem", color: "var(--color-text-primary)" }}>{user.full_name}</p>
+                    <p style={{ margin: 0, fontSize: "0.75rem", color: "var(--color-text-light)" }}>{user.email}</p>
+                  </div>
+                </div>
+
+                <Link href="/history" className="flex items-center gap-2 py-2 text-sm font-semibold"
+                  style={{ color: isHistory ? "var(--color-primary)" : "var(--color-text-secondary)" }}>
+                  <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                  Scan History
+                </Link>
+
+                <a href="/#analyze" className="btn btn-primary" style={{ justifyContent: "center" }}>
+                  Analyse Scan
+                </a>
+
+                <button onClick={logout} className="btn btn-ghost" style={{ justifyContent: "center", color: "var(--color-text-light)" }}>
+                  <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                <Link href="/login" className="btn btn-ghost" style={{ justifyContent: "center" }}>Sign In</Link>
+                <Link href="/register" className="btn btn-primary" style={{ justifyContent: "center" }}>Get Started</Link>
+              </>
+            )}
           </div>
         </div>
       )}

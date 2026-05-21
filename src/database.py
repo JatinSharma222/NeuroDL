@@ -1,13 +1,21 @@
 """
 src/database.py
 ───────────────
-SQLite database models and helper functions for NeuroDL v2.0.
+NeuroDL v2.0 — PostgreSQL database models and helpers.
 
 Tables:
-  patients — one record per patient registration
-  scans    — one record per MRI analysis, linked to a patient
+  users    — registered patient accounts (email + bcrypt password)
+  patients — patient profile linked to a user account
+  scans    — MRI analysis results linked to a patient
 
-Auto-creates neurodl.db in the project root on first run.
+PostgreSQL setup:
+  brew install postgresql@15 && brew services start postgresql@15
+  psql postgres -c "CREATE DATABASE neurodl;"
+  psql postgres -c "CREATE USER neurodl_user WITH PASSWORD 'your_password';"
+  psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE neurodl TO neurodl_user;"
+
+Environment variable:
+  DATABASE_URL=postgresql://neurodl_user:your_password@localhost:5432/neurodl
 """
 
 import os
@@ -28,13 +36,13 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 # ─── Database Setup ───────────────────────────────────────────────────────────
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///neurodl.db")
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},  # Required for SQLite + Flask
-    echo=False,
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://neurodl_user:your_password@localhost:5432/neurodl",
 )
+
+# PostgreSQL does NOT need check_same_thread
+engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -43,27 +51,56 @@ Base = declarative_base()
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
-class Patient(Base):
+class User(Base):
     """
-    One record per patient registration.
-    Created when the user fills the patient form before uploading MRI.
+    Registered patient account.
+    One user -> one or more patient profiles (one per visit).
     """
-    __tablename__ = "patients"
+    __tablename__ = "users"
 
-    id         = Column(Integer, primary_key=True, autoincrement=True)
-    name       = Column(String(150), nullable=False)
-    age        = Column(Integer,     nullable=False)
-    gender     = Column(String(20),  nullable=False)          # Male / Female / Other
-    phone      = Column(String(20),  nullable=True)           # optional
-    symptoms   = Column(Text,        nullable=True)           # optional free text
-    created_at = Column(DateTime,    default=datetime.utcnow)
+    id            = Column(Integer,     primary_key=True, autoincrement=True)
+    email         = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name     = Column(String(150), nullable=False)
+    created_at    = Column(DateTime,    default=datetime.utcnow)
 
-    # One patient → one scan (one-to-one via uselist=False)
-    scan = relationship("Scan", back_populates="patient", uselist=False)
+    patients = relationship("Patient", back_populates="user", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
             "id":         self.id,
+            "email":      self.email,
+            "full_name":  self.full_name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def __repr__(self):
+        return f"<User id={self.id} email='{self.email}'>"
+
+
+class Patient(Base):
+    """
+    Patient profile created before each MRI analysis session.
+    Linked to an authenticated user account.
+    """
+    __tablename__ = "patients"
+
+    id         = Column(Integer,     primary_key=True, autoincrement=True)
+    user_id    = Column(Integer,     ForeignKey("users.id"), nullable=True)
+    name       = Column(String(150), nullable=False)
+    age        = Column(Integer,     nullable=False)
+    gender     = Column(String(20),  nullable=False)
+    phone      = Column(String(20),  nullable=True)
+    symptoms   = Column(Text,        nullable=True)
+    created_at = Column(DateTime,    default=datetime.utcnow)
+
+    user = relationship("User",    back_populates="patients")
+    scan = relationship("Scan",    back_populates="patient", uselist=False)
+
+    def to_dict(self):
+        return {
+            "id":         self.id,
+            "user_id":    self.user_id,
             "name":       self.name,
             "age":        self.age,
             "gender":     self.gender,
@@ -78,23 +115,19 @@ class Patient(Base):
 
 
 class Scan(Base):
-    """
-    One MRI analysis record, linked to a Patient.
-    Auto-saved after every /predict call.
-    """
+    """One MRI analysis record linked to a Patient."""
     __tablename__ = "scans"
 
-    id                     = Column(Integer, primary_key=True, autoincrement=True)
-    patient_id             = Column(Integer, ForeignKey("patients.id"), nullable=True)
-    scan_timestamp         = Column(DateTime, default=datetime.utcnow)
+    id                     = Column(Integer,     primary_key=True, autoincrement=True)
+    patient_id             = Column(Integer,     ForeignKey("patients.id"), nullable=True)
+    scan_timestamp         = Column(DateTime,    default=datetime.utcnow)
     predicted_class        = Column(String(50),  nullable=False)
-    confidence_score       = Column(Float,        nullable=False)
-    segmentation_performed = Column(Boolean,      default=False)
-    gradcam_performed      = Column(Boolean,      default=False)
-    file_name              = Column(String(255),  nullable=True)
-    report_text            = Column(Text,         nullable=True)
+    confidence_score       = Column(Float,       nullable=False)
+    segmentation_performed = Column(Boolean,     default=False)
+    gradcam_performed      = Column(Boolean,     default=False)
+    file_name              = Column(String(255), nullable=True)
+    report_text            = Column(Text,        nullable=True)
 
-    # Relationship back to patient
     patient = relationship("Patient", back_populates="scan")
 
     def to_dict(self):
@@ -120,39 +153,73 @@ class Scan(Base):
 # ─── Database Initialisation ──────────────────────────────────────────────────
 
 def init_db():
-    """
-    Create all tables if they don't exist yet.
-    Called once at app startup from app.py.
-    """
+    """Create all tables. Called once at app startup."""
     Base.metadata.create_all(bind=engine)
-    print("✓ Database initialised (neurodl.db)")
+    print("✓ PostgreSQL database initialised")
+
+
+# ─── User CRUD ────────────────────────────────────────────────────────────────
+
+def create_user(email: str, password_hash: str, full_name: str) -> "User":
+    """
+    Insert a new user. Raises ValueError if email already exists.
+    Returns the User ORM object.
+    """
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.email == email.lower().strip()).first()
+        if existing:
+            raise ValueError("Email already registered")
+        user = User(
+            email         = email.lower().strip(),
+            password_hash = password_hash,
+            full_name     = full_name.strip(),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        print(f"✓ User created — id={user.id}, email='{user.email}'")
+        return user
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def get_user_by_email(email: str):
+    """Fetch a User by email (case-insensitive). Returns ORM object or None."""
+    db = SessionLocal()
+    try:
+        return db.query(User).filter(User.email == email.lower().strip()).first()
+    finally:
+        db.close()
+
+
+def get_user_by_id(user_id: int):
+    """Fetch a User by primary key. Returns ORM object or None."""
+    db = SessionLocal()
+    try:
+        return db.query(User).filter(User.id == user_id).first()
+    finally:
+        db.close()
 
 
 # ─── Patient CRUD ─────────────────────────────────────────────────────────────
 
 def create_patient(
-    name: str,
-    age: int,
-    gender: str,
-    phone: str = None,
+    name:     str,
+    age:      int,
+    gender:   str,
+    phone:    str = None,
     symptoms: str = None,
+    user_id:  int = None,
 ) -> int:
-    """
-    Insert a new patient record and return its ID.
-
-    Args:
-        name     : Full name of the patient
-        age      : Age in years
-        gender   : Male / Female / Other
-        phone    : Optional contact number
-        symptoms : Optional free-text symptom description
-
-    Returns:
-        int: New patient's primary key
-    """
+    """Insert a new patient and return its ID."""
     db = SessionLocal()
     try:
         patient = Patient(
+            user_id  = user_id,
             name     = name.strip(),
             age      = int(age),
             gender   = gender.strip(),
@@ -164,38 +231,28 @@ def create_patient(
         db.refresh(patient)
         print(f"✓ Patient saved — id={patient.id}, name='{patient.name}'")
         return patient.id
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print(f"✗ Failed to save patient: {e}")
         raise
     finally:
         db.close()
 
 
 def get_patients(
-    page: int = 1,
+    page:     int = 1,
     per_page: int = 20,
-    search: str = None,
+    search:   str = None,
+    user_id:  int = None,
 ) -> dict:
-    """
-    Retrieve paginated patient records with their linked scan.
-
-    Args:
-        page     : Page number (1-indexed)
-        per_page : Records per page (max 100)
-        search   : Optional name search (partial match)
-
-    Returns:
-        dict with keys: total, page, per_page, patients (list of dicts)
-    """
+    """Paginated patient list. Filtered by user_id to scope to logged-in user."""
     per_page = min(per_page, 100)
     db = SessionLocal()
     try:
         query = db.query(Patient)
-
+        if user_id:
+            query = query.filter(Patient.user_id == user_id)
         if search:
             query = query.filter(Patient.name.ilike(f"%{search}%"))
-
         total    = query.count()
         patients = (
             query.order_by(Patient.created_at.desc())
@@ -203,7 +260,6 @@ def get_patients(
             .limit(per_page)
             .all()
         )
-
         return {
             "total":    total,
             "page":     page,
@@ -215,7 +271,7 @@ def get_patients(
 
 
 def get_patient_by_id(patient_id: int) -> dict | None:
-    """Return a single patient with their scan, or None if not found."""
+    """Return a single patient with their scan, or None."""
     db = SessionLocal()
     try:
         patient = db.query(Patient).filter(Patient.id == patient_id).first()
@@ -225,12 +281,7 @@ def get_patient_by_id(patient_id: int) -> dict | None:
 
 
 def delete_patient(patient_id: int) -> bool:
-    """
-    Delete a patient and their linked scan record.
-
-    Returns:
-        True if deleted, False if not found
-    """
+    """Delete a patient and their linked scan."""
     db = SessionLocal()
     try:
         patient = db.query(Patient).filter(Patient.id == patient_id).first()
@@ -240,9 +291,8 @@ def delete_patient(patient_id: int) -> bool:
         db.commit()
         print(f"✓ Patient id={patient_id} deleted")
         return True
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print(f"✗ Failed to delete patient: {e}")
         raise
     finally:
         db.close()
@@ -251,29 +301,15 @@ def delete_patient(patient_id: int) -> bool:
 # ─── Scan CRUD ────────────────────────────────────────────────────────────────
 
 def save_scan(
-    predicted_class: str,
-    confidence_score: float,
+    predicted_class:        str,
+    confidence_score:       float,
     segmentation_performed: bool = False,
-    gradcam_performed: bool = False,
-    file_name: str = None,
-    report_text: str = None,
-    patient_id: int = None,
+    gradcam_performed:      bool = False,
+    file_name:              str  = None,
+    report_text:            str  = None,
+    patient_id:             int  = None,
 ) -> int:
-    """
-    Insert a new scan record linked to a patient and return its ID.
-
-    Args:
-        predicted_class        : e.g. "Glioma Tumor"
-        confidence_score       : Float between 0 and 1
-        segmentation_performed : Whether pseudo-segmentation ran
-        gradcam_performed      : Whether Grad-CAM ran
-        file_name              : Original uploaded filename
-        report_text            : LLM-generated radiology report
-        patient_id             : FK to patients.id (int, not string)
-
-    Returns:
-        int: New scan's primary key
-    """
+    """Insert a new scan record and return its ID."""
     db = SessionLocal()
     try:
         scan = Scan(
@@ -290,42 +326,40 @@ def save_scan(
         db.refresh(scan)
         print(f"✓ Scan saved — id={scan.id}, class='{scan.predicted_class}'")
         return scan.id
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print(f"✗ Failed to save scan: {e}")
         raise
     finally:
         db.close()
 
 
 def get_scans(
-    page: int = 1,
-    per_page: int = 20,
+    page:       int = 1,
+    per_page:   int = 20,
     class_name: str = None,
-    date_from: str = None,
-    date_to: str = None,
+    date_from:  str = None,
+    date_to:    str = None,
+    user_id:    int = None,
 ) -> dict:
     """
-    Retrieve paginated scan records with optional filters.
-
-    Returns:
-        dict with keys: total, page, per_page, scans (list of dicts)
+    Paginated scan history. Scoped to user_id via patient join
+    so patients only see their own scans.
     """
     per_page = min(per_page, 100)
     db = SessionLocal()
     try:
         query = db.query(Scan)
-
+        if user_id:
+            query = query.join(Patient).filter(Patient.user_id == user_id)
         if class_name:
             query = query.filter(Scan.predicted_class.ilike(f"%{class_name}%"))
-
         if date_from:
             try:
-                dt_from = datetime.strptime(date_from, "%Y-%m-%d")
-                query = query.filter(Scan.scan_timestamp >= dt_from)
+                query = query.filter(
+                    Scan.scan_timestamp >= datetime.strptime(date_from, "%Y-%m-%d")
+                )
             except ValueError:
                 pass
-
         if date_to:
             try:
                 dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(
@@ -334,7 +368,6 @@ def get_scans(
                 query = query.filter(Scan.scan_timestamp <= dt_to)
             except ValueError:
                 pass
-
         total = query.count()
         scans = (
             query.order_by(Scan.scan_timestamp.desc())
@@ -342,7 +375,6 @@ def get_scans(
             .limit(per_page)
             .all()
         )
-
         return {
             "total":    total,
             "page":     page,
@@ -354,7 +386,7 @@ def get_scans(
 
 
 def get_scan_by_id(scan_id: int) -> dict | None:
-    """Return a single scan record by primary key, or None if not found."""
+    """Return a single scan by primary key."""
     db = SessionLocal()
     try:
         scan = db.query(Scan).filter(Scan.id == scan_id).first()
@@ -374,9 +406,8 @@ def delete_scan(scan_id: int) -> bool:
         db.commit()
         print(f"✓ Scan id={scan_id} deleted")
         return True
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print(f"✗ Failed to delete scan: {e}")
         raise
     finally:
         db.close()
