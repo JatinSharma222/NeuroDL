@@ -186,7 +186,7 @@ const RegisterForm = () => {
             onFocus={onFocus}
             onBlur={onBlur}
             onKeyDown={onKeyDown}
-            placeholder="Rajan Sharma"
+            placeholder="Name"
             disabled={loading}
             autoComplete="name"
             style={{ ...inputStyle, borderColor: errors.full_name ? "#dc2626" : "var(--color-border)" }}

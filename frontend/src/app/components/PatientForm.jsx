@@ -1,16 +1,6 @@
 "use client";
 import React, { useState } from "react";
-
-/**
- * PatientForm.jsx
- * ───────────────
- * Step 1 of the diagnosis flow.
- * Collects patient details, POSTs to /patients, then calls
- * onSuccess(patientId, patientName) to advance to Step 2 (MRI upload).
- *
- * Props:
- *   onSuccess (fn) — called with (patientId: int, patientName: string)
- */
+import { useAuth } from "../context/AuthContext";
 
 const GENDERS = ["Male", "Female", "Other"];
 
@@ -42,6 +32,7 @@ const optionalStyle = {
 };
 
 const PatientForm = ({ onSuccess }) => {
+  const { authFetch } = useAuth();
   const [form, setForm] = useState({
     name:     "",
     age:      "",
@@ -49,32 +40,31 @@ const PatientForm = ({ onSuccess }) => {
     phone:    "",
     symptoms: "",
   });
-  const [errors,  setErrors]  = useState({});
-  const [loading, setLoading] = useState(false);
+  const [errors,   setErrors]   = useState({});
+  const [loading,  setLoading]  = useState(false);
   const [apiError, setApiError] = useState("");
 
-  // ── Field change ──────────────────────────────────────────────
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
-    // Clear error on change
     if (errors[name]) setErrors((prev) => ({ ...prev, [name]: "" }));
   };
 
-  // ── Validation ────────────────────────────────────────────────
   const validate = () => {
     const errs = {};
-    if (!form.name.trim())          errs.name   = "Patient name is required";
-    if (!form.age)                  errs.age    = "Age is required";
+    if (!form.name.trim())
+      errs.name = "Patient name is required";
+    if (!form.age)
+      errs.age = "Age is required";
     else if (isNaN(form.age) || +form.age < 1 || +form.age > 129)
-                                    errs.age    = "Enter a valid age (1–129)";
-    if (!form.gender)               errs.gender = "Please select a gender";
+      errs.age = "Enter a valid age (1–129)";
+    if (!form.gender)
+      errs.gender = "Please select a gender";
     if (form.phone && !/^[\d\s\+\-\(\)]{7,15}$/.test(form.phone))
-                                    errs.phone  = "Enter a valid phone number";
+      errs.phone = "Enter a valid phone number";
     return errs;
   };
 
-  // ── Submit ────────────────────────────────────────────────────
   const handleSubmit = async () => {
     setApiError("");
     const errs = validate();
@@ -86,7 +76,7 @@ const PatientForm = ({ onSuccess }) => {
     setLoading(true);
     try {
       const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
-      const res = await fetch(`${API_URL}/patients`, {
+      const res = await authFetch(`${API_URL}/patients`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
@@ -112,7 +102,6 @@ const PatientForm = ({ onSuccess }) => {
     }
   };
 
-  // ── Focus / blur handlers ────────────────────────────────────
   const onFocus = (e) => (e.target.style.borderColor = "var(--color-primary)");
   const onBlur  = (e) => (e.target.style.borderColor = errors[e.target.name] ? "#dc2626" : "var(--color-border)");
 
@@ -123,18 +112,18 @@ const PatientForm = ({ onSuccess }) => {
       <div style={{ textAlign: "center", marginBottom: "var(--spacing-xl)" }}>
         <div
           style={{
-            display:        "inline-flex",
-            alignItems:     "center",
-            gap:            8,
-            padding:        "6px 16px",
-            background:     "rgba(230,0,35,0.07)",
-            borderRadius:   "var(--radius-full)",
-            color:          "var(--color-primary)",
-            fontSize:       "0.82rem",
-            fontWeight:     700,
-            marginBottom:   "var(--spacing-md)",
-            letterSpacing:  "0.04em",
-            textTransform:  "uppercase",
+            display:       "inline-flex",
+            alignItems:    "center",
+            gap:           8,
+            padding:       "6px 16px",
+            background:    "rgba(230,0,35,0.07)",
+            borderRadius:  "var(--radius-full)",
+            color:         "var(--color-primary)",
+            fontSize:      "0.82rem",
+            fontWeight:    700,
+            marginBottom:  "var(--spacing-md)",
+            letterSpacing: "0.04em",
+            textTransform: "uppercase",
           }}
         >
           <span>Step 1 of 2</span>
@@ -151,10 +140,10 @@ const PatientForm = ({ onSuccess }) => {
         </h2>
         <p
           style={{
-            marginTop:  "0.5rem",
+            marginTop:    "0.5rem",
             marginBottom: 0,
-            color:      "var(--color-text-light)",
-            fontSize:   "0.95rem",
+            color:        "var(--color-text-light)",
+            fontSize:     "0.95rem",
           }}
         >
           Fill in the patient information before uploading the MRI scan
@@ -185,12 +174,11 @@ const PatientForm = ({ onSuccess }) => {
             placeholder="Name"
             maxLength={150}
             disabled={loading}
-            style={{
-              ...fieldStyle,
-              borderColor: errors.name ? "#dc2626" : "var(--color-border)",
-            }}
+            style={{ ...fieldStyle, borderColor: errors.name ? "#dc2626" : "var(--color-border)" }}
           />
-          {errors.name && <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.name}</p>}
+          {errors.name && (
+            <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.name}</p>
+          )}
         </div>
 
         {/* Age */}
@@ -210,12 +198,11 @@ const PatientForm = ({ onSuccess }) => {
             min={1}
             max={129}
             disabled={loading}
-            style={{
-              ...fieldStyle,
-              borderColor: errors.age ? "#dc2626" : "var(--color-border)",
-            }}
+            style={{ ...fieldStyle, borderColor: errors.age ? "#dc2626" : "var(--color-border)" }}
           />
-          {errors.age && <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.age}</p>}
+          {errors.age && (
+            <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.age}</p>
+          )}
         </div>
 
         {/* Gender */}
@@ -245,7 +232,9 @@ const PatientForm = ({ onSuccess }) => {
             <option value="">Select gender</option>
             {GENDERS.map((g) => <option key={g} value={g}>{g}</option>)}
           </select>
-          {errors.gender && <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.gender}</p>}
+          {errors.gender && (
+            <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.gender}</p>
+          )}
         </div>
 
         {/* Phone */}
@@ -263,16 +252,15 @@ const PatientForm = ({ onSuccess }) => {
             placeholder="Phone number"
             maxLength={15}
             disabled={loading}
-            style={{
-              ...fieldStyle,
-              borderColor: errors.phone ? "#dc2626" : "var(--color-border)",
-            }}
+            style={{ ...fieldStyle, borderColor: errors.phone ? "#dc2626" : "var(--color-border)" }}
           />
-          {errors.phone && <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.phone}</p>}
+          {errors.phone && (
+            <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.phone}</p>
+          )}
         </div>
       </div>
 
-      {/* Symptoms — full width */}
+      {/* Symptoms */}
       <div style={{ marginBottom: "var(--spacing-xl)" }}>
         <label style={labelStyle}>
           Symptoms / Reason for Scan<span style={optionalStyle}>(optional)</span>

@@ -38,7 +38,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://neurodl_user:your_password@localhost:5432/neurodl",
+    "postgresql://jatinsharma@localhost:5432/neurodl",
 )
 
 # PostgreSQL does NOT need check_same_thread
