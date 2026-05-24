@@ -1,28 +1,59 @@
-# ─── Core Framework ───────────────────────────────────────────────
+absl-py==2.4.0
+astunparse==1.6.3
+bcrypt==5.0.0
+blinker==1.9.0
+certifi==2026.5.20
+charset-normalizer==3.4.7
+click==8.4.1
 Flask==3.0.3
 Flask-Cors==4.0.0
-gunicorn==25.3.0
-
-# ─── ML / Deep Learning ───────────────────────────────────────────
-tensorflow==2.16.2
-keras==3.14.0
-h5py==3.14.0
-
-# ─── Image Processing ─────────────────────────────────────────────
+flatbuffers==25.12.19
+gast==0.7.0
+google-pasta==0.2.0
+grpcio==1.80.0
+gunicorn==23.0.0
+h5py==3.11.0
+idna==3.16
+ImageIO==2.37.3
+itsdangerous==2.2.0
+Jinja2==3.1.6
+keras==3.14.1
+lazy-loader==0.5
+libclang==18.1.1
+Markdown==3.10.2
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+ml-dtypes==0.3.2
+namex==0.1.0
+networkx==3.6.1
 numpy==1.26.4
-pillow==12.2.0
-scikit-image==0.26.0
-opencv-python-headless==4.13.0.92
-scipy==1.17.1
-
-# ─── DICOM Support ────────────────────────────────────────────────
-pydicom==3.0.2
-
-# ─── LLM Report Generation (Ollama via HTTP) ──────────────────────
-requests==2.33.1
-
-# ─── Database / Scan History ──────────────────────────────────────
-SQLAlchemy==2.0.49
-
-# ─── Environment & Utilities ──────────────────────────────────────
-python-dotenv==1.2.2
+opencv-python-headless==4.10.0.84
+opt_einsum==3.4.0
+optree==0.19.1
+packaging==26.2
+pillow==10.4.0
+protobuf==4.25.9
+psycopg2-binary==2.9.12
+pydicom==2.4.4
+Pygments==2.20.0
+PyJWT==2.13.0
+python-dotenv==1.0.1
+requests==2.32.3
+rich==15.0.0
+scikit-image==0.24.0
+scipy==1.13.1
+setuptools==82.0.1
+six==1.17.0
+SQLAlchemy==2.0.36
+tensorboard==2.16.2
+tensorboard-data-server==0.7.2
+tensorflow==2.16.1
+tensorflow-metal==1.2.0
+termcolor==3.3.0
+tifffile==2026.3.3
+typing_extensions==4.15.0
+urllib3==2.7.0
+Werkzeug==3.1.8
+wheel==0.47.0
+wrapt==2.2.0
