@@ -434,34 +434,32 @@ const ReportPanel = ({ report, loading }) => {
 
     const htmlContent = buildPDFHTML(blocks, report);
 
-    // Create hidden iframe
-    const iframe = document.createElement("iframe");
-    iframe.style.position = "fixed";
-    iframe.style.top      = "-9999px";
-    iframe.style.left     = "-9999px";
-    iframe.style.width    = "210mm";
-    iframe.style.height   = "297mm";
-    document.body.appendChild(iframe);
+    // Open a new window — more reliable than iframe across all browsers
+    const printWindow = window.open("", "_blank", "width=900,height=700");
+    if (!printWindow) {
+      // Popup blocked — fall back to blob URL
+      const blob = new Blob([htmlContent], { type: "text/html" });
+      const url  = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+      setDownloading(false);
+      return;
+    }
 
-    const iframeDoc = iframe.contentWindow.document;
-    iframeDoc.open();
-    iframeDoc.write(htmlContent);
-    iframeDoc.close();
+    printWindow.document.open();
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
 
-    // Wait for content to render then print
-    iframe.onload = () => {
-      setTimeout(() => {
-        try {
-          iframe.contentWindow.focus();
-          iframe.contentWindow.print();
-        } finally {
-          setTimeout(() => {
-            document.body.removeChild(iframe);
-            setDownloading(false);
-          }, 1000);
-        }
-      }, 500);
-    };
+    // Give the browser time to render then trigger print
+    setTimeout(() => {
+      try {
+        printWindow.focus();
+        printWindow.print();
+      } catch (e) {
+        console.error("Print failed:", e);
+      } finally {
+        setDownloading(false);
+      }
+    }, 800);
   };
 
   return (
