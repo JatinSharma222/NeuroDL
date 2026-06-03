@@ -6,6 +6,7 @@ const HomePage = () => {
   return (
     <ProtectedRoute>
     <div className="min-h-screen bg-white">
+
       {/* Hero Section */}
       <section className="pt-32 pb-20 bg-white">
         <div className="container">
@@ -16,13 +17,13 @@ const HomePage = () => {
               </svg>
               AI-Powered Medical Analysis
             </div>
-            
+
             <h1 className="text-6xl md:text-7xl font-bold mb-8 text-black">
               Brain Tumor
               <br />
               Detection
             </h1>
-            
+
             <p className="text-2xl text-gray-600 mb-12 max-w-2xl mx-auto leading-relaxed">
               Upload an MRI scan and let advanced deep learning analyze and detect brain tumors with precision.
             </p>
@@ -39,25 +40,29 @@ const HomePage = () => {
         </div>
       </section>
 
-      {/* Stats Section */}
+      {/* Stats Section — real numbers from evaluation */}
       <section className="py-16 bg-gray-50">
         <div className="container">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-8 text-center">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
             <div className="card-flat">
-              <div className="text-5xl font-bold text-red-600 mb-2">84.13%</div>
-              <div className="text-gray-600 font-medium">Accuracy</div>
+              <div className="text-5xl font-bold text-red-600 mb-2">94.92%</div>
+              <div className="text-gray-600 font-medium">ResNet50V2 Accuracy</div>
+              <div className="text-gray-400 text-xs mt-1">Fine-tuned on MRI dataset</div>
             </div>
             <div className="card-flat">
-              <div className="text-5xl font-bold text-red-600 mb-2">34K+</div>
-              <div className="text-gray-600 font-medium">Training Images</div>
+              <div className="text-5xl font-bold text-red-600 mb-2">96.07%</div>
+              <div className="text-gray-600 font-medium">Ensemble Accuracy</div>
+              <div className="text-gray-400 text-xs mt-1">Meta-model (ResNet + CNN)</div>
             </div>
             <div className="card-flat">
               <div className="text-5xl font-bold text-red-600 mb-2">4</div>
               <div className="text-gray-600 font-medium">Tumor Classes</div>
+              <div className="text-gray-400 text-xs mt-1">Glioma · Meningioma · Pituitary · None</div>
             </div>
             <div className="card-flat">
-              <div className="text-5xl font-bold text-red-600 mb-2">&lt;3s</div>
-              <div className="text-gray-600 font-medium">Analysis Time</div>
+              <div className="text-5xl font-bold text-red-600 mb-2">7K+</div>
+              <div className="text-gray-600 font-medium">Training Images</div>
+              <div className="text-gray-400 text-xs mt-1">224×224 · 4 balanced classes</div>
             </div>
           </div>
         </div>
@@ -83,7 +88,7 @@ const HomePage = () => {
                 </svg>
               </div>
               <h3>Lightning Fast</h3>
-              <p>Get accurate results in under 3 seconds with our optimized neural network</p>
+              <p>Get accurate results in under 3 seconds with our optimized ResNet50V2 pipeline</p>
             </div>
 
             <div className="feature-card">
@@ -92,8 +97,8 @@ const HomePage = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
-              <h3>High Accuracy</h3>
-              <p>84.13% classification accuracy using ResNet50V2 architecture</p>
+              <h3>94.92% Accuracy</h3>
+              <p>Fine-tuned ResNet50V2 with ensemble meta-model reaching 96.07% on the test set</p>
             </div>
 
             <div className="feature-card">
@@ -103,8 +108,38 @@ const HomePage = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                 </svg>
               </div>
-              <h3>Visual Segmentation</h3>
-              <p>See highlighted tumor regions with advanced U-Net segmentation</p>
+              <h3>Grad-CAM Explainability</h3>
+              <p>See exactly which regions drove the prediction with Grad-CAM heatmaps and pseudo-segmentation</p>
+            </div>
+
+            <div className="feature-card">
+              <div className="feature-icon">
+                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </div>
+              <h3>Class Probability Chart</h3>
+              <p>Full softmax distribution across all 4 classes — not just the top prediction</p>
+            </div>
+
+            <div className="feature-card">
+              <div className="feature-icon">
+                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                </svg>
+              </div>
+              <h3>AI Radiology Report</h3>
+              <p>Structured 8-section clinical report via Ollama llama3.1:8b — downloadable as PDF</p>
+            </div>
+
+            <div className="feature-card">
+              <div className="feature-icon">
+                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+              </div>
+              <h3>Patient Management</h3>
+              <p>Full patient records with scan history, JWT auth, and per-user data isolation</p>
             </div>
           </div>
         </div>
@@ -122,7 +157,7 @@ const HomePage = () => {
                 Upload an MRI scan or select a sample to see instant AI-powered analysis
               </p>
             </div>
-            
+
             <div className="card">
               <InferenceForm />
             </div>
@@ -138,7 +173,7 @@ const HomePage = () => {
               What We Detect
             </h2>
             <p className="text-xl text-gray-600 max-w-2xl mx-auto">
-              Our AI can identify and classify four types of brain conditions
+              Our AI identifies and classifies four brain conditions from MRI scans
             </p>
           </div>
 
@@ -178,8 +213,53 @@ const HomePage = () => {
         </div>
       </section>
 
-      {/* Important Notice */}
+      {/* Model Performance Table */}
       <section className="section bg-gray-50">
+        <div className="container">
+          <div className="max-w-4xl mx-auto">
+            <div className="text-center mb-12">
+              <h2 className="text-4xl font-bold text-black mb-4">Model Performance</h2>
+              <p className="text-gray-600">Evaluated on held-out test set (~1,311 images)</p>
+            </div>
+            <div className="card" style={{ overflow: "hidden", padding: 0 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
+                <thead>
+                  <tr style={{ background: "var(--color-bg-tertiary)" }}>
+                    <th style={{ padding: "14px 20px", textAlign: "left", fontWeight: 700, color: "var(--color-text-secondary)", fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>Model</th>
+                    <th style={{ padding: "14px 20px", textAlign: "center", fontWeight: 700, color: "var(--color-text-secondary)", fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>Val Accuracy</th>
+                    <th style={{ padding: "14px 20px", textAlign: "center", fontWeight: 700, color: "var(--color-text-secondary)", fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>Parameters</th>
+                    <th style={{ padding: "14px 20px", textAlign: "left", fontWeight: 700, color: "var(--color-text-secondary)", fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { model: "ResNet50V2 (frozen)", acc: "82.56%", params: "24.1M", note: "Transfer learning baseline", highlight: false },
+                    { model: "ResNet50V2 (fine-tuned)", acc: "94.92%", params: "24.1M", note: "Primary classifier + Grad-CAM", highlight: true },
+                    { model: "Custom CNN", acc: "72.48%", params: "1.3M", note: "GlobalAveragePooling2D", highlight: false },
+                    { model: "Meta-Model (Ensemble)", acc: "96.07%", params: "0.04M", note: "ResNet + CNN stacked", highlight: true },
+                  ].map((row, i) => (
+                    <tr key={i} style={{
+                      borderTop: "1px solid var(--color-border-light)",
+                      background: row.highlight ? "rgba(230,0,35,0.03)" : "white",
+                    }}>
+                      <td style={{ padding: "14px 20px", fontWeight: row.highlight ? 700 : 400, color: "var(--color-text-primary)" }}>
+                        {row.model}
+                        {row.highlight && <span style={{ marginLeft: 8, fontSize: "0.7rem", background: "#fee2e2", color: "#dc2626", padding: "2px 7px", borderRadius: 99, fontWeight: 700 }}>BEST</span>}
+                      </td>
+                      <td style={{ padding: "14px 20px", textAlign: "center", fontWeight: 700, color: row.highlight ? "var(--color-primary)" : "var(--color-text-primary)" }}>{row.acc}</td>
+                      <td style={{ padding: "14px 20px", textAlign: "center", color: "var(--color-text-secondary)" }}>{row.params}</td>
+                      <td style={{ padding: "14px 20px", color: "var(--color-text-light)", fontSize: "0.875rem" }}>{row.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Important Notice */}
+      <section className="section bg-white">
         <div className="container">
           <div className="max-w-4xl mx-auto">
             <div className="alert alert-warning">
@@ -189,9 +269,9 @@ const HomePage = () => {
               <div>
                 <h4 className="font-bold text-lg mb-2">Important Medical Notice</h4>
                 <p className="leading-relaxed">
-                  This tool is for research and educational purposes only. It is not intended for clinical diagnosis 
-                  and should not replace professional medical advice. Always consult qualified healthcare professionals 
-                  for medical diagnosis and treatment decisions. The AI model's predictions should be verified by medical experts.
+                  This tool is for research and educational purposes only. It is not intended for clinical diagnosis
+                  and should not replace professional medical advice. Always consult qualified healthcare professionals
+                  for medical diagnosis and treatment decisions. The AI model's predictions must be verified by a medical expert.
                 </p>
               </div>
             </div>
@@ -200,7 +280,7 @@ const HomePage = () => {
       </section>
 
       {/* Technology Section */}
-      <section className="section bg-white">
+      <section className="section bg-gray-50">
         <div className="container">
           <div className="max-w-5xl mx-auto">
             <div className="text-center mb-16">
@@ -208,7 +288,7 @@ const HomePage = () => {
                 The Technology
               </h2>
               <p className="text-xl text-gray-600 max-w-2xl mx-auto">
-                Built on cutting-edge deep learning architectures and trained on thousands of medical images
+                Built on cutting-edge deep learning architectures and trained on thousands of labelled MRI scans
               </p>
             </div>
 
@@ -216,28 +296,29 @@ const HomePage = () => {
               <div className="info-section">
                 <h3>Model Architecture</h3>
                 <ul>
-                  <li>ResNet50V2 Base Model</li>
-                  <li>Transfer Learning from ImageNet</li>
-                  <li>U-Net Segmentation Network</li>
-                  <li>Ensemble Meta-Model</li>
-                  <li>Custom CNN Classifier</li>
+                  <li>ResNet50V2 fine-tuned at lr=1e-5</li>
+                  <li>Transfer learning from ImageNet</li>
+                  <li>Custom CNN with GlobalAveragePooling2D</li>
+                  <li>Ensemble Meta-Model (stacked)</li>
+                  <li>Grad-CAM at conv5_block3_out (7×7)</li>
                 </ul>
               </div>
 
               <div className="info-section">
                 <h3>Training Dataset</h3>
                 <ul>
-                  <li>34,000+ MRI Scans</li>
-                  <li>4 Balanced Classes</li>
-                  <li>70% Training / 30% Testing</li>
-                  <li>Data Augmentation Applied</li>
-                  <li>Medical Expert Validated</li>
+                  <li>~7,023 MRI scans total</li>
+                  <li>4 balanced classes</li>
+                  <li>80% train / 20% val split</li>
+                  <li>Rotation, flip, zoom augmentation</li>
+                  <li>224×224 input resolution</li>
                 </ul>
               </div>
             </div>
           </div>
         </div>
       </section>
+
     </div>
     </ProtectedRoute>
   );

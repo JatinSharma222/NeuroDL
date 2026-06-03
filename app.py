@@ -320,12 +320,20 @@ def predict(current_user):
         confidence      = float(predictions[0][predicted_class])
         class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
 
+        # Full softmax distribution across all 4 classes
+        class_probabilities = {
+            CLASS_NAMES[i]: float(predictions[0][i])
+            for i in range(len(predictions[0]))
+        }
+
         print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
+        print(f"[PREDICT] Probs : { {k: f'{v:.3f}' for k, v in class_probabilities.items()} }")
 
         response = {
             "final_class":             predicted_class,
             "class_name":              class_name,
             "confidence":              f"{confidence:.2%}",
+            "class_probabilities":     class_probabilities,
             "model_used":              "ResNet50V2",
             "model_accuracy":          "94.92%",
             "segmentation_performed":  False,

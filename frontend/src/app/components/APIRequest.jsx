@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import Loader from "./Loader";
 import HeatmapViewer from "./HeatmapViewer";
 import ReportPanel from "./ReportPanel";
+import ProbabilityChart from "./ProbabilityChart";
 import { useToast } from "@chakra-ui/react";
 import { useAuth } from "../context/AuthContext";
 
@@ -11,6 +12,7 @@ import { useAuth } from "../context/AuthContext";
  * APIRequest.jsx
  * ──────────────
  * NeuroDL v2.0 — sends MRI to /predict with JWT auth and patient_id.
+ * Now renders ProbabilityChart with the full 4-class softmax distribution.
  *
  * Props:
  *   image     (File)       — selected MRI file
@@ -55,8 +57,6 @@ const APIRequest = ({ image, patientId = null }) => {
     try {
       const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
 
-      // authFetch adds Authorization: Bearer <token> automatically
-      // Do NOT set Content-Type manually — browser sets it with FormData boundary
       const res = await authFetch(`${API_URL}/predict`, {
         method: "POST",
         body:   formData,
@@ -168,6 +168,14 @@ const APIRequest = ({ image, patientId = null }) => {
               )}
             </div>
           </div>
+
+          {/* ── Probability chart — all 4 classes ── */}
+          {response.class_probabilities && (
+            <ProbabilityChart
+              probabilities={response.class_probabilities}
+              predictedClass={response.class_name}
+            />
+          )}
 
           {/* Heatmap viewer */}
           <HeatmapViewer
