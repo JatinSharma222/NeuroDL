@@ -33,6 +33,9 @@ from flask_cors import CORS
 from src.auth import create_token, hash_password, require_auth, verify_password
 from src.config import RESNET50_MODEL_PATH
 from src.database import (
+    SessionLocal,
+    Patient,
+    Scan,
     create_patient,
     create_user,
     delete_patient,
@@ -313,56 +316,19 @@ def predict(current_user):
 
     try:
         # ── Step 1: Load + classify ───────────────────────────────
-        image_np     = load_image(file)
-        preprocessed = preprocess_classification(image_np)
-
+        image_np        = load_image(file)
+        preprocessed    = preprocess_classification(image_np)
         predictions     = classification_model.predict(preprocessed, verbose=0)
         predicted_class = int(np.argmax(predictions[0]))
         confidence      = float(predictions[0][predicted_class])
         class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
 
-        # Full softmax distribution across all 4 classes
-        class_probabilities = {
-            CLASS_NAMES[i]: float(predictions[0][i])
-            for i in range(len(predictions[0]))
-        }
-
-        # ── MC Dropout uncertainty (T=20 stochastic forward passes) ──
-        MC_SAMPLES = 20
-        try:
-            mc_preds = np.array([
-                classification_model(preprocessed, training=True).numpy()
-                for _ in range(MC_SAMPLES)
-            ])                           # (T, 1, 4)
-            mc_preds = mc_preds[:, 0, :] # (T, 4)
-            mc_mean  = mc_preds.mean(axis=0)
-            mc_std   = mc_preds.std(axis=0)
-            eps      = 1e-8
-            entropy  = float(-np.sum(mc_mean * np.log(mc_mean + eps)))
-            pred_std = float(mc_std[predicted_class])
-            is_uncertain = bool(pred_std > 0.08)
-            uncertainty = {
-                "mc_samples":   MC_SAMPLES,
-                "pred_std":     round(pred_std, 4),
-                "pred_entropy": round(entropy, 4),
-                "is_uncertain": is_uncertain,
-                "class_std":  {CLASS_NAMES[i]: round(float(mc_std[i]),  4) for i in range(len(mc_std))},
-                "class_mean": {CLASS_NAMES[i]: round(float(mc_mean[i]), 4) for i in range(len(mc_mean))},
-            }
-            print(f"[PREDICT] MC Dropout — pred_std={pred_std:.4f}, entropy={entropy:.4f}, uncertain={is_uncertain}")
-        except Exception as mc_err:
-            print(f"[PREDICT] MC Dropout skipped: {mc_err}")
-            uncertainty = None
-
         print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
-        print(f"[PREDICT] Probs : { {k: f'{v:.3f}' for k, v in class_probabilities.items()} }")
 
         response = {
             "final_class":             predicted_class,
             "class_name":              class_name,
             "confidence":              f"{confidence:.2%}",
-            "class_probabilities":     class_probabilities,
-            "uncertainty":             uncertainty,
             "model_used":              "ResNet50V2",
             "model_accuracy":          "94.92%",
             "segmentation_performed":  False,
@@ -506,6 +472,103 @@ def history_delete(current_user, scan_id):
         return jsonify({"message": f"Scan {scan_id} deleted"}), 200
     except Exception:
         return jsonify({"error": "Failed to delete scan"}), 500
+
+
+# ─── Stats / Analytics Endpoint ──────────────────────────────────────────────
+
+@app.route("/stats", methods=["GET"])
+@require_auth
+def stats(current_user):
+    """
+    Returns aggregated analytics for the authenticated user's scans:
+      - total scan count
+      - class distribution (count per class)
+      - average confidence per class
+      - scans per day (last 30 days)
+      - overall average confidence
+      - segmentation/gradcam/report usage counts
+    """
+    try:
+        from sqlalchemy import func, cast, Date
+        db = SessionLocal()
+        user_id = int(current_user["sub"])
+
+        # ── All scans for this user ────────────────────────────────
+        scans = (
+            db.query(Scan)
+            .join(Patient, Scan.patient_id == Patient.id, isouter=True)
+            .filter(
+                (Patient.user_id == user_id) |
+                (Scan.patient_id == None)
+            )
+            .all()
+        )
+        db.close()
+
+        total = len(scans)
+        if total == 0:
+            return jsonify({
+                "total": 0,
+                "class_distribution": {},
+                "avg_confidence": {},
+                "overall_avg_confidence": 0,
+                "scans_per_day": [],
+                "feature_usage": {"segmentation": 0, "gradcam": 0, "report": 0},
+            }), 200
+
+        # ── Class distribution + avg confidence ───────────────────
+        from collections import defaultdict
+        class_counts = defaultdict(int)
+        class_conf   = defaultdict(list)
+
+        for s in scans:
+            class_counts[s.predicted_class] += 1
+            class_conf[s.predicted_class].append(s.confidence_score)
+
+        avg_confidence = {
+            cls: round(sum(vals) / len(vals), 4)
+            for cls, vals in class_conf.items()
+        }
+
+        # ── Scans per day (last 30 days) ──────────────────────────
+        from datetime import datetime, timedelta
+        today    = datetime.utcnow().date()
+        day_map  = defaultdict(int)
+        for s in scans:
+            if s.scan_timestamp:
+                d = s.scan_timestamp.date()
+                if d >= today - timedelta(days=29):
+                    day_map[d.isoformat()] += 1
+
+        # Fill all 30 days (0 for days with no scans)
+        scans_per_day = []
+        for i in range(29, -1, -1):
+            day = (today - timedelta(days=i)).isoformat()
+            scans_per_day.append({"date": day, "count": day_map.get(day, 0)})
+
+        # ── Feature usage ─────────────────────────────────────────
+        feature_usage = {
+            "segmentation": sum(1 for s in scans if s.segmentation_performed),
+            "gradcam":       sum(1 for s in scans if s.gradcam_performed),
+            "report":        sum(1 for s in scans if s.report_text),
+        }
+
+        all_conf = [s.confidence_score for s in scans]
+        overall_avg = round(sum(all_conf) / len(all_conf), 4)
+
+        return jsonify({
+            "total":                   total,
+            "class_distribution":      dict(class_counts),
+            "avg_confidence":          avg_confidence,
+            "overall_avg_confidence":  overall_avg,
+            "scans_per_day":           scans_per_day,
+            "feature_usage":           feature_usage,
+        }), 200
+
+    except Exception:
+        print(f"[STATS] Error:
+{traceback.format_exc()}")
+        return jsonify({"error": "Failed to fetch stats"}), 500
 
 
 # ─── Error Handlers ───────────────────────────────────────────────────────────
