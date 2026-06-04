@@ -169,11 +169,12 @@ const APIRequest = ({ image, patientId = null }) => {
             </div>
           </div>
 
-          {/* ── Probability chart — all 4 classes ── */}
+          {/* ── Probability chart + MC Dropout uncertainty ── */}
           {response.class_probabilities && (
             <ProbabilityChart
               probabilities={response.class_probabilities}
               predictedClass={response.class_name}
+              uncertainty={response.uncertainty || null}
             />
           )}
 

@@ -313,8 +313,9 @@ def predict(current_user):
 
     try:
         # ── Step 1: Load + classify ───────────────────────────────
-        image_np        = load_image(file)
-        preprocessed    = preprocess_classification(image_np)
+        image_np     = load_image(file)
+        preprocessed = preprocess_classification(image_np)
+
         predictions     = classification_model.predict(preprocessed, verbose=0)
         predicted_class = int(np.argmax(predictions[0]))
         confidence      = float(predictions[0][predicted_class])
@@ -326,6 +327,33 @@ def predict(current_user):
             for i in range(len(predictions[0]))
         }
 
+        # ── MC Dropout uncertainty (T=20 stochastic forward passes) ──
+        MC_SAMPLES = 20
+        try:
+            mc_preds = np.array([
+                classification_model(preprocessed, training=True).numpy()
+                for _ in range(MC_SAMPLES)
+            ])                           # (T, 1, 4)
+            mc_preds = mc_preds[:, 0, :] # (T, 4)
+            mc_mean  = mc_preds.mean(axis=0)
+            mc_std   = mc_preds.std(axis=0)
+            eps      = 1e-8
+            entropy  = float(-np.sum(mc_mean * np.log(mc_mean + eps)))
+            pred_std = float(mc_std[predicted_class])
+            is_uncertain = bool(pred_std > 0.08)
+            uncertainty = {
+                "mc_samples":   MC_SAMPLES,
+                "pred_std":     round(pred_std, 4),
+                "pred_entropy": round(entropy, 4),
+                "is_uncertain": is_uncertain,
+                "class_std":  {CLASS_NAMES[i]: round(float(mc_std[i]),  4) for i in range(len(mc_std))},
+                "class_mean": {CLASS_NAMES[i]: round(float(mc_mean[i]), 4) for i in range(len(mc_mean))},
+            }
+            print(f"[PREDICT] MC Dropout — pred_std={pred_std:.4f}, entropy={entropy:.4f}, uncertain={is_uncertain}")
+        except Exception as mc_err:
+            print(f"[PREDICT] MC Dropout skipped: {mc_err}")
+            uncertainty = None
+
         print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
         print(f"[PREDICT] Probs : { {k: f'{v:.3f}' for k, v in class_probabilities.items()} }")
 
@@ -334,6 +362,7 @@ def predict(current_user):
             "class_name":              class_name,
             "confidence":              f"{confidence:.2%}",
             "class_probabilities":     class_probabilities,
+            "uncertainty":             uncertainty,
             "model_used":              "ResNet50V2",
             "model_accuracy":          "94.92%",
             "segmentation_performed":  False,
