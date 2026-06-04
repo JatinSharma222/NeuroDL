@@ -566,8 +566,7 @@ def stats(current_user):
         }), 200
 
     except Exception:
-        print(f"[STATS] Error:
-{traceback.format_exc()}")
+        print("[STATS] Error:\n" + traceback.format_exc())
         return jsonify({"error": "Failed to fetch stats"}), 500
 
 
