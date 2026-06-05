@@ -335,6 +335,11 @@ def predict(current_user):
         confidence      = float(predictions[0][predicted_class])
         class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
 
+        class_probabilities = {
+        CLASS_NAMES[i]: float(predictions[0][i])
+        for i in range(len(predictions[0]))
+        }
+
         print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
 
         response = {
@@ -350,6 +355,7 @@ def predict(current_user):
             "report":                  None,
             "scan_id":                 None,
             "patient_id":              patient_id,
+            "class_probabilities": class_probabilities,
         }
 
         # ── Step 2: Visual analysis (tumour only) ─────────────────
