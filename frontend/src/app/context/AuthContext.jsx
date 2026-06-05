@@ -61,12 +61,42 @@ export const AuthProvider = ({ children }) => {
   };
 
   // ── authFetch — wrapper that adds Authorization header ─────────
+  // On 401, attempts a silent token refresh once before giving up.
   const authFetch = async (url, options = {}) => {
-    const headers = {
+    const makeHeaders = (tok) => ({
       ...(options.headers || {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    };
-    return fetch(url, { ...options, headers });
+      ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+    });
+
+    // First attempt
+    let res = await fetch(url, { ...options, headers: makeHeaders(token) });
+
+    // If 401, try to refresh the token silently
+    if (res.status === 401 && token) {
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
+        const refreshRes = await fetch(`${API_URL}/auth/refresh`, {
+          method:  "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (refreshRes.ok) {
+          const data     = await refreshRes.json();
+          const newToken = data.token;
+          // Persist the new token
+          localStorage.setItem(TOKEN_KEY, newToken);
+          setToken(newToken);
+          // Retry the original request with new token
+          res = await fetch(url, { ...options, headers: makeHeaders(newToken) });
+        } else {
+          // Refresh also failed — force logout
+          logout();
+        }
+      } catch {
+        logout();
+      }
+    }
+
+    return res;
   };
 
   return (

@@ -33,9 +33,6 @@ from flask_cors import CORS
 from src.auth import create_token, hash_password, require_auth, verify_password
 from src.config import RESNET50_MODEL_PATH
 from src.database import (
-    SessionLocal,
-    Patient,
-    Scan,
     create_patient,
     create_user,
     delete_patient,
@@ -474,100 +471,28 @@ def history_delete(current_user, scan_id):
         return jsonify({"error": "Failed to delete scan"}), 500
 
 
-# ─── Stats / Analytics Endpoint ──────────────────────────────────────────────
+# ─── Token Refresh ───────────────────────────────────────────────────────────
 
-@app.route("/stats", methods=["GET"])
+@app.route("/auth/refresh", methods=["POST"])
 @require_auth
-def stats(current_user):
+def refresh_token(current_user):
     """
-    Returns aggregated analytics for the authenticated user's scans:
-      - total scan count
-      - class distribution (count per class)
-      - average confidence per class
-      - scans per day (last 30 days)
-      - overall average confidence
-      - segmentation/gradcam/report usage counts
+    Issues a fresh JWT for an already-authenticated user.
+    Frontend calls this on 401 to silently re-authenticate without
+    forcing the user to log in again.
     """
     try:
-        from sqlalchemy import func, cast, Date
-        db = SessionLocal()
-        user_id = int(current_user["sub"])
-
-        # ── All scans for this user ────────────────────────────────
-        scans = (
-            db.query(Scan)
-            .join(Patient, Scan.patient_id == Patient.id, isouter=True)
-            .filter(
-                (Patient.user_id == user_id) |
-                (Scan.patient_id == None)
-            )
-            .all()
-        )
-        db.close()
-
-        total = len(scans)
-        if total == 0:
-            return jsonify({
-                "total": 0,
-                "class_distribution": {},
-                "avg_confidence": {},
-                "overall_avg_confidence": 0,
-                "scans_per_day": [],
-                "feature_usage": {"segmentation": 0, "gradcam": 0, "report": 0},
-            }), 200
-
-        # ── Class distribution + avg confidence ───────────────────
-        from collections import defaultdict
-        class_counts = defaultdict(int)
-        class_conf   = defaultdict(list)
-
-        for s in scans:
-            class_counts[s.predicted_class] += 1
-            class_conf[s.predicted_class].append(s.confidence_score)
-
-        avg_confidence = {
-            cls: round(sum(vals) / len(vals), 4)
-            for cls, vals in class_conf.items()
-        }
-
-        # ── Scans per day (last 30 days) ──────────────────────────
-        from datetime import datetime, timedelta
-        today    = datetime.utcnow().date()
-        day_map  = defaultdict(int)
-        for s in scans:
-            if s.scan_timestamp:
-                d = s.scan_timestamp.date()
-                if d >= today - timedelta(days=29):
-                    day_map[d.isoformat()] += 1
-
-        # Fill all 30 days (0 for days with no scans)
-        scans_per_day = []
-        for i in range(29, -1, -1):
-            day = (today - timedelta(days=i)).isoformat()
-            scans_per_day.append({"date": day, "count": day_map.get(day, 0)})
-
-        # ── Feature usage ─────────────────────────────────────────
-        feature_usage = {
-            "segmentation": sum(1 for s in scans if s.segmentation_performed),
-            "gradcam":       sum(1 for s in scans if s.gradcam_performed),
-            "report":        sum(1 for s in scans if s.report_text),
-        }
-
-        all_conf = [s.confidence_score for s in scans]
-        overall_avg = round(sum(all_conf) / len(all_conf), 4)
-
+        user = get_user_by_id(int(current_user["sub"]))
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        new_token = create_token(user.id, user.email, user.full_name)
         return jsonify({
-            "total":                   total,
-            "class_distribution":      dict(class_counts),
-            "avg_confidence":          avg_confidence,
-            "overall_avg_confidence":  overall_avg,
-            "scans_per_day":           scans_per_day,
-            "feature_usage":           feature_usage,
+            "token": new_token,
+            "user":  user.to_dict(),
         }), 200
-
     except Exception:
-        print("[STATS] Error:\n" + traceback.format_exc())
-        return jsonify({"error": "Failed to fetch stats"}), 500
+        print(f"[Auth] Refresh error:\n{traceback.format_exc()}")
+        return jsonify({"error": "Token refresh failed"}), 500
 
 
 # ─── Error Handlers ───────────────────────────────────────────────────────────
@@ -590,4 +515,4 @@ def server_error(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     print(f"\n NeuroDL v2.0  |  port={port}  |  PostgreSQL  |  JWT auth\n")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
