@@ -29,12 +29,13 @@ import numpy as np
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 
 from src.auth import create_token, hash_password, require_auth, verify_password
 from src.config import RESNET50_MODEL_PATH
 from src.database import (
+    SessionLocal,
+    Patient,
+    Scan,
     create_patient,
     create_user,
     delete_patient,
@@ -59,22 +60,6 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
-
-# ─── Rate Limiting ─────────────────────────────────────────────────────────────
-# Keyed by IP address. Limits:
-#   /predict          — 10/min   (inference is GPU-heavy)
-#   /auth/login       — 5/min    (brute-force protection)
-#   /auth/register    — 3/min    (spam protection)
-#   /auth/refresh     — 20/min   (silent refresh should be infrequent)
-#   /stats, /history  — 30/min   (read-only, light)
-#   global default    — 200/day, 60/hour
-
-limiter = Limiter(
-    app             = app,
-    key_func        = get_remote_address,
-    default_limits  = ["200 per day", "60 per hour"],
-    storage_uri     = "memory://",   # swap to "redis://localhost:6379" in production
-)
 
 @app.before_request
 def handle_options():
@@ -140,7 +125,6 @@ def home():
 # ─── Auth Routes ──────────────────────────────────────────────────────────────
 
 @app.route("/auth/register", methods=["POST"])
-@limiter.limit("3 per minute")
 def register():
     data = request.get_json(silent=True)
     if not data:
@@ -186,7 +170,6 @@ def register():
 
 
 @app.route("/auth/login", methods=["POST"])
-@limiter.limit("5 per minute")
 def login():
     data = request.get_json(silent=True)
     if not data:
@@ -326,7 +309,6 @@ def patient_delete(current_user, patient_id):
 
 @app.route("/predict", methods=["POST"])
 @require_auth
-@limiter.limit("10 per minute")
 def predict(current_user):
     if "image" not in request.files:
         return jsonify({"error": "No image provided"}), 400
@@ -508,7 +490,6 @@ def history_delete(current_user, scan_id):
 
 @app.route("/auth/refresh", methods=["POST"])
 @require_auth
-@limiter.limit("20 per minute")
 def refresh_token(current_user):
     """
     Issues a fresh JWT for an already-authenticated user.
@@ -529,96 +510,7 @@ def refresh_token(current_user):
         return jsonify({"error": "Token refresh failed"}), 500
 
 
-# ─── Stats / Analytics Endpoint ──────────────────────────────────────────────
-
-@app.route("/stats", methods=["GET"])
-@require_auth
-def stats(current_user):
-    """Aggregated analytics for the authenticated user's scans."""
-    try:
-        from collections import defaultdict
-        from datetime import datetime, timedelta
-
-        db      = SessionLocal()
-        user_id = int(current_user["sub"])
-
-        scans = (
-            db.query(Scan)
-            .join(Patient, Scan.patient_id == Patient.id, isouter=True)
-            .filter(
-                (Patient.user_id == user_id) |
-                (Scan.patient_id == None)
-            )
-            .all()
-        )
-        db.close()
-
-        total = len(scans)
-        if total == 0:
-            return jsonify({
-                "total": 0, "class_distribution": {},
-                "avg_confidence": {}, "overall_avg_confidence": 0,
-                "scans_per_day": [], "feature_usage": {"segmentation": 0, "gradcam": 0, "report": 0},
-            }), 200
-
-        class_counts = defaultdict(int)
-        class_conf   = defaultdict(list)
-        for s in scans:
-            class_counts[s.predicted_class] += 1
-            class_conf[s.predicted_class].append(s.confidence_score)
-
-        avg_confidence = {
-            cls: round(sum(vals) / len(vals), 4)
-            for cls, vals in class_conf.items()
-        }
-
-        today   = datetime.utcnow().date()
-        day_map = defaultdict(int)
-        for s in scans:
-            if s.scan_timestamp:
-                d = s.scan_timestamp.date()
-                if d >= today - timedelta(days=29):
-                    day_map[d.isoformat()] += 1
-
-        scans_per_day = [
-            {"date": (today - timedelta(days=i)).isoformat(),
-             "count": day_map.get((today - timedelta(days=i)).isoformat(), 0)}
-            for i in range(29, -1, -1)
-        ]
-
-        feature_usage = {
-            "segmentation": sum(1 for s in scans if s.segmentation_performed),
-            "gradcam":       sum(1 for s in scans if s.gradcam_performed),
-            "report":        sum(1 for s in scans if s.report_text),
-        }
-
-        all_conf    = [s.confidence_score for s in scans]
-        overall_avg = round(sum(all_conf) / len(all_conf), 4)
-
-        return jsonify({
-            "total":                  total,
-            "class_distribution":     dict(class_counts),
-            "avg_confidence":         avg_confidence,
-            "overall_avg_confidence": overall_avg,
-            "scans_per_day":          scans_per_day,
-            "feature_usage":          feature_usage,
-        }), 200
-
-    except Exception:
-        print("[STATS] Error: " + traceback.format_exc())
-        return jsonify({"error": "Failed to fetch stats"}), 500
-
-
 # ─── Error Handlers ───────────────────────────────────────────────────────────
-
-@app.errorhandler(429)
-def ratelimit_handler(e):
-    return jsonify({
-        "error":   "Rate limit exceeded",
-        "message": str(e.description),
-        "retry_after": e.retry_after if hasattr(e, "retry_after") else None,
-    }), 429
-
 
 @app.errorhandler(404)
 def not_found(e):
