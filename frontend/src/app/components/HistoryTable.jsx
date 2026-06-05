@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
 import ScanCompare from "./ScanCompare";
+import { useAuth } from "../context/AuthContext";
 
 /**
  * HistoryTable.jsx
@@ -67,6 +68,8 @@ const SkeletonRow = () => (
 // ── Main Component ────────────────────────────────────────────────
 
 const HistoryTable = () => {
+  const { authFetch } = useAuth();
+
   // ── State ──────────────────────────────────────────────────────
   const [scans,       setScans]       = useState([]);
   const [total,       setTotal]       = useState(0);
@@ -100,8 +103,8 @@ const HistoryTable = () => {
         ...(filterTo    && { date_to:    filterTo    }),
       });
 
-      const res = await fetch(`${API_URL}/history?${params}`);
-      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      const res = await authFetch(`${API_URL}/history?${params}`);
+      if (!res.ok) throw new Error(`Server error: ${res.status}. Is the Flask server running?`);
 
       const data = await res.json();
       setScans(data.scans || []);
@@ -123,7 +126,7 @@ const HistoryTable = () => {
     if (!deleteId) return;
     setDeleting(true);
     try {
-      const res = await fetch(`${API_URL}/history/${deleteId}`, {
+      const res = await authFetch(`${API_URL}/history/${deleteId}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error("Delete failed");

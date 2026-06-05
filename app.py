@@ -56,7 +56,19 @@ from src.utils import load_local_model
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+@app.before_request
+def handle_options():
+    """Return 200 immediately for all OPTIONS preflight requests."""
+    from flask import request as req
+    if req.method == "OPTIONS":
+        from flask import make_response
+        resp = make_response("", 200)
+        resp.headers["Access-Control-Allow-Origin"]  = "*"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        return resp
 
 CLASS_NAMES = {
     0: "Glioma Tumor",
