@@ -1,5 +1,6 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
+import ScanCompare from "./ScanCompare";
 
 /**
  * HistoryTable.jsx
@@ -76,6 +77,8 @@ const HistoryTable = () => {
   const [expandedId,  setExpandedId]  = useState(null);   // expanded report row
   const [deleteId,    setDeleteId]    = useState(null);   // confirm-delete target
   const [deleting,    setDeleting]    = useState(false);
+  const [compareIds,  setCompareIds]  = useState([]);    // up to 2 scan IDs for comparison
+  const [showCompare, setShowCompare] = useState(false);
 
   // Filters
   const [filterClass, setFilterClass] = useState("");
@@ -348,6 +351,29 @@ const HistoryTable = () => {
                           </button>
                         )}
 
+                        {/* Compare toggle */}
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          title={compareIds.includes(scan.id) ? "Remove from comparison" : "Add to comparison"}
+                          onClick={() => {
+                            setCompareIds(prev => {
+                              if (prev.includes(scan.id)) return prev.filter(id => id !== scan.id);
+                              if (prev.length >= 2)        return [prev[1], scan.id];
+                              return [...prev, scan.id];
+                            });
+                          }}
+                          style={{
+                            background:  compareIds.includes(scan.id) ? "#eff6ff" : undefined,
+                            color:       compareIds.includes(scan.id) ? "#2563eb" : undefined,
+                            borderColor: compareIds.includes(scan.id) ? "#2563eb" : undefined,
+                          }}
+                        >
+                          <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                              d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                          </svg>
+                        </button>
+
                         {/* Delete */}
                         <button
                           className="btn btn-danger btn-sm"
@@ -437,6 +463,51 @@ const HistoryTable = () => {
           </div>
         )}
       </div>
+
+      {/* ── Compare floating bar ── */}
+      {compareIds.length > 0 && (
+        <div style={{
+          position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
+          zIndex: 1000, background: "#1e3a8a", color: "white",
+          borderRadius: "var(--radius-full)", padding: "12px 20px",
+          display: "flex", alignItems: "center", gap: 14,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.25)",
+          fontSize: "0.875rem", fontWeight: 600,
+          whiteSpace: "nowrap",
+        }}>
+          <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          {compareIds.length === 1
+            ? "Select one more scan to compare"
+            : `Comparing Scan #${compareIds[0]} vs #${compareIds[1]}`}
+          {compareIds.length === 2 && (
+            <button
+              onClick={() => setShowCompare(true)}
+              style={{ background: "white", color: "#1e3a8a", border: "none", borderRadius: "var(--radius-sm)", padding: "5px 14px", fontWeight: 700, cursor: "pointer", fontSize: "0.82rem" }}
+            >
+              Compare →
+            </button>
+          )}
+          <button
+            onClick={() => { setCompareIds([]); setShowCompare(false); }}
+            style={{ background: "none", border: "none", color: "rgba(255,255,255,0.7)", cursor: "pointer", padding: 2, marginLeft: 4 }}
+          >
+            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {/* ── ScanCompare modal ── */}
+      {showCompare && compareIds.length === 2 && (
+        <ScanCompare
+          scanIds={compareIds}
+          onClose={() => setShowCompare(false)}
+        />
+      )}
 
       {/* ── Delete confirmation modal ── */}
       {deleteId && (
