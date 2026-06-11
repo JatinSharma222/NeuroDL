@@ -1,334 +1,345 @@
 "use client";
-import React, { useState } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 
 /**
  * HeatmapViewer.jsx  —  NeuroDL v2.0
  * ────────────────────────────────────
- * Displays three visual outputs side-by-side:
- *   1. Original MRI scan
- *   2. U-Net Tumour Segmentation  ← PRIMARY (dedicated trained model)
- *   3. Grad-CAM heatmap           ← SECONDARY (classifier explainability only)
+ * Before/after drag slider replaces the old 3-card tab layout.
  *
- * Order change rationale:
- *   The ResNet50V2 backbone was fine-tuned after initial training, but Grad-CAM
- *   gradients still reflect the classifier's attention — NOT the anatomical tumour
- *   boundary. The VGG16-U-Net segmentation model was trained specifically on
- *   brain MRI with pixel-level masks and is the reliable localisation output.
- *   Grad-CAM is preserved as an explainability tool, clearly labelled as such.
+ * Left side  = original MRI (always)
+ * Right side = Segmentation overlay OR Grad-CAM  (toggle via pill buttons)
+ *
+ * The divider is draggable on both desktop (mousemove) and mobile (touchmove).
+ * A range input sits invisibly over the whole card as the drag target so
+ * native touch/pointer handling works without custom event math.
  *
  * Props:
  *   image         (File)          — original uploaded image file
- *   gradcamImage  (string | null) — base64 PNG from /predict response
- *   segmentImage  (string | null) — base64 JPEG from /predict response
+ *   gradcamImage  (string | null) — base64 PNG from /predict
+ *   segmentImage  (string | null) — base64 JPEG from /predict
  *   className     (string)        — predicted class name e.g. "Glioma Tumor"
  */
 
+const LABELS = {
+  segment: { icon: "🎯", text: "Tumour region",    badge: "Primary output",   badgeStyle: { background: "#dcfce7", color: "#14532d" } },
+  gradcam: { icon: "🔥", text: "Grad-CAM heatmap", badge: "Explainability",   badgeStyle: { background: "#fef9c3", color: "#854d0e" } },
+};
+
 const HeatmapViewer = ({ image, gradcamImage, segmentImage, className }) => {
-  // Default to segmentation tab — it's the primary localisation output
-  const [activeTab, setActiveTab] = useState("segment");
+  const [pos,        setPos]        = useState(50);   // 0–100 %
+  const [overlay,    setOverlay]    = useState("segment");
+  const [isDragging, setIsDragging] = useState(false);
+  const containerRef = useRef(null);
+  const originalURL  = image ? URL.createObjectURL(image) : null;
+  const hasTumour    = gradcamImage || segmentImage;
 
-  const originalURL = image ? URL.createObjectURL(image) : null;
-  const hasTumour   = gradcamImage || segmentImage;
+  // Cleanup object URL on unmount
+  useEffect(() => () => { if (originalURL) URL.revokeObjectURL(originalURL); }, []);
 
-  // ── Shared card style ──────────────────────────────────────────
-  const cardStyle = {
+  // Fallback: if segment is missing but gradcam is present, switch view
+  useEffect(() => {
+    if (!segmentImage && gradcamImage) setOverlay("gradcam");
+  }, [segmentImage, gradcamImage]);
+
+  const overlayDataURL =
+    overlay === "segment" && segmentImage
+      ? `data:image/jpeg;base64,${segmentImage}`
+      : overlay === "gradcam" && gradcamImage
+      ? `data:image/png;base64,${gradcamImage}`
+      : null;
+
+  // ── Shared slider handler ──────────────────────────────────────
+  const handleMove = useCallback((clientX) => {
+    if (!containerRef.current) return;
+    const { left, width } = containerRef.current.getBoundingClientRect();
+    const pct = Math.min(100, Math.max(0, ((clientX - left) / width) * 100));
+    setPos(Math.round(pct));
+  }, []);
+
+  const onMouseDown = () => setIsDragging(true);
+  const onMouseUp   = () => setIsDragging(false);
+  const onMouseMove = (e) => { if (isDragging) handleMove(e.clientX); };
+
+  // ── Styles ────────────────────────────────────────────────────
+  const card = {
     background:   "white",
     borderRadius: "var(--radius-lg, 16px)",
     border:       "1px solid var(--color-border-light, #e5e7eb)",
-    padding:      "var(--spacing-lg, 20px)",
-    display:      "flex",
-    flexDirection:"column",
-    gap:          "var(--spacing-sm, 10px)",
-  };
-
-  const imgWrapStyle = {
-    borderRadius: "var(--radius-md, 10px)",
     overflow:     "hidden",
-    background:   "#000",
-    aspectRatio:  "1 / 1",
-    display:      "flex",
-    alignItems:   "center",
-    justifyContent:"center",
   };
 
   const imgStyle = {
+    position:  "absolute",
+    inset:     0,
     width:     "100%",
     height:    "100%",
     objectFit: "cover",
     display:   "block",
+    userSelect:"none",
+    draggable: false,
   };
 
-  const cardTitleStyle = {
-    fontSize:   "0.95rem",
-    fontWeight: 700,
-    color:      "var(--color-text-primary, #111)",
-    margin:     0,
-    display:    "flex",
-    alignItems: "center",
-    gap:        6,
+  const pillBase = {
+    display:       "inline-flex",
+    alignItems:    "center",
+    gap:           5,
+    padding:       "5px 12px",
+    borderRadius:  99,
+    fontSize:      "0.78rem",
+    fontWeight:    700,
+    cursor:        "pointer",
+    border:        "1.5px solid transparent",
+    transition:    "all 0.15s",
+    userSelect:    "none",
   };
 
-  const captionStyle = {
-    fontSize:  "0.78rem",
-    color:     "var(--color-text-light, #9ca3af)",
-    margin:    0,
-    lineHeight: 1.4,
-  };
-
-  // ── Primary badge (segmentation) ──────────────────────────────
-  const primaryBadge = {
-    display:      "inline-flex",
-    alignItems:   "center",
-    gap:          4,
-    fontSize:     "0.68rem",
-    fontWeight:   700,
-    padding:      "2px 8px",
-    borderRadius: 99,
-    background:   "#dcfce7",
-    color:        "#15803d",
-    letterSpacing:"0.03em",
-    textTransform:"uppercase",
-  };
-
-  // ── Explainability badge (Grad-CAM) ───────────────────────────
-  const explainBadge = {
-    display:      "inline-flex",
-    alignItems:   "center",
-    gap:          4,
-    fontSize:     "0.68rem",
-    fontWeight:   700,
-    padding:      "2px 8px",
-    borderRadius: 99,
-    background:   "#fef9c3",
-    color:        "#854d0e",
-    letterSpacing:"0.03em",
-    textTransform:"uppercase",
-  };
-
-  return (
-    <div className="fade-in" style={{ marginTop: "var(--spacing-xl, 28px)" }}>
-
-      {/* ── Section header ── */}
-      <div style={{ marginBottom: "var(--spacing-lg, 20px)" }}>
-        <h3 style={{ fontSize:"1.25rem", fontWeight:700, color:"var(--color-text-primary,#111)", marginBottom:4 }}>
+  // ── No tumour: just show original ─────────────────────────────
+  if (!hasTumour) {
+    return (
+      <div style={{ marginTop: "var(--spacing-xl, 28px)" }}>
+        <h3 style={{ fontSize: "1.15rem", fontWeight: 700, color: "var(--color-text-primary)", marginBottom: 8 }}>
           Visual Analysis
         </h3>
-        <p style={{ fontSize:"0.88rem", color:"var(--color-text-light,#6b7280)", margin:0 }}>
-          {hasTumour
-            ? "The yellow region shows where the classifier focused (Grad-CAM thresholded). The Grad-CAM heatmap shows the full activation map."
-            : "No tumour detected — visual analysis not applicable."}
+        <p style={{ fontSize: "0.875rem", color: "var(--color-text-light)", marginBottom: 16 }}>
+          No tumour detected — visual analysis not applicable.
         </p>
-      </div>
-
-      {/* ── No tumour ── */}
-      {!hasTumour && (
-        <div style={{ maxWidth:360, margin:"0 auto" }}>
-          <div style={cardStyle}>
-            <p style={cardTitleStyle}>🧠 Original MRI</p>
-            <div style={imgWrapStyle}>
-              {originalURL && <img src={originalURL} alt="Original MRI scan" style={imgStyle} />}
-            </div>
-            <p style={captionStyle}>Uploaded scan — no tumour detected</p>
+        <div style={{ ...card, maxWidth: 380 }}>
+          <div style={{ aspectRatio: "1/1", position: "relative", background: "#000" }}>
+            {originalURL && <img src={originalURL} alt="Original MRI" style={imgStyle} />}
+          </div>
+          <div style={{ padding: "10px 14px", fontSize: "0.8rem", color: "var(--color-text-light)" }}>
+            Uploaded scan — no abnormality detected
           </div>
         </div>
-      )}
+      </div>
+    );
+  }
 
-      {/* ── Tumour detected ── */}
-      {hasTumour && (
-        <>
-          {/* Mobile tab bar — default is "segment" */}
-          <div
-            className="md:hidden"
-            style={{
-              display:"flex", gap:6,
-              marginBottom:"var(--spacing-md,16px)",
-              overflowX:"auto", paddingBottom:4,
-            }}
-          >
-            {[
-              { key:"original",  label:"Original"      },
-              segmentImage && { key:"segment",   label:"Segmentation" },
-              gradcamImage && { key:"gradcam",   label:"Grad-CAM"     },
-            ]
-              .filter(Boolean)
-              .map(({ key, label }) => (
+  const label = LABELS[overlay] || LABELS.segment;
+
+  return (
+    <div style={{ marginTop: "var(--spacing-xl, 28px)" }}
+         onMouseMove={onMouseMove}
+         onMouseUp={onMouseUp}
+         onMouseLeave={onMouseUp}>
+
+      {/* ── Section header ── */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <div>
+          <h3 style={{ fontSize: "1.15rem", fontWeight: 700, color: "var(--color-text-primary)", margin: 0 }}>
+            Visual Analysis
+          </h3>
+          <p style={{ fontSize: "0.82rem", color: "var(--color-text-light)", margin: "3px 0 0" }}>
+            Drag the slider to compare original scan with the overlay
+          </p>
+        </div>
+
+        {/* Toggle pills — only show if both overlays exist */}
+        {segmentImage && gradcamImage && (
+          <div style={{ display: "flex", gap: 6 }}>
+            {["segment", "gradcam"].map((key) => {
+              const l      = LABELS[key];
+              const active = overlay === key;
+              return (
                 <button
                   key={key}
-                  onClick={() => setActiveTab(key)}
-                  className={`btn btn-sm ${activeTab === key ? "btn-primary" : "btn-ghost"}`}
-                  style={{ flexShrink:0 }}
+                  onClick={() => setOverlay(key)}
+                  style={{
+                    ...pillBase,
+                    background:   active ? (key === "segment" ? "#f0fdf4" : "#fefce8") : "var(--color-bg-tertiary, #f3f4f6)",
+                    color:        active ? (key === "segment" ? "#15803d" : "#854d0e") : "var(--color-text-secondary)",
+                    borderColor:  active ? (key === "segment" ? "#86efac" : "#fde047") : "transparent",
+                  }}
                 >
-                  {label}
+                  {l.icon} {l.text}
                 </button>
-              ))}
+              );
+            })}
           </div>
+        )}
+      </div>
 
-          {/* Desktop grid — 3 columns */}
-          <div
-            style={{
-              display:"grid",
-              gridTemplateColumns:"repeat(auto-fit, minmax(260px, 1fr))",
-              gap:"var(--spacing-lg,20px)",
-            }}
-          >
+      {/* ── Before/after slider card ── */}
+      <div
+        ref={containerRef}
+        style={{ ...card, position: "relative", aspectRatio: "4/3", background: "#000", cursor: "ew-resize", maxHeight: 520 }}
+        onMouseDown={onMouseDown}
+        onTouchMove={(e) => handleMove(e.touches[0].clientX)}
+        onTouchStart={() => setIsDragging(true)}
+        onTouchEnd={() => setIsDragging(false)}
+      >
+        {/* Layer 1: original MRI (full width, underneath) */}
+        {originalURL && (
+          <img src={originalURL} alt="Original MRI" style={imgStyle} draggable={false} />
+        )}
 
-            {/* ── Card 1: Original ── */}
-            <div style={cardStyle}>
-              <p style={cardTitleStyle}>
-                <span>🧠</span> Original MRI
+        {/* Layer 2: overlay clipped to left portion */}
+        {overlayDataURL && (
+          <div style={{
+            position:  "absolute",
+            inset:     0,
+            clipPath:  `inset(0 ${100 - pos}% 0 0)`,
+            transition: isDragging ? "none" : "clip-path 0.05s",
+          }}>
+            <img
+              src={overlayDataURL}
+              alt={label.text}
+              style={imgStyle}
+              draggable={false}
+            />
+          </div>
+        )}
+
+        {/* ── Divider line ── */}
+        <div style={{
+          position:         "absolute",
+          top:              0,
+          bottom:           0,
+          left:             `${pos}%`,
+          width:            2,
+          background:       "white",
+          transform:        "translateX(-50%)",
+          boxShadow:        "0 0 6px rgba(0,0,0,0.4)",
+          pointerEvents:    "none",
+          transition:       isDragging ? "none" : "left 0.05s",
+        }} />
+
+        {/* ── Drag handle circle ── */}
+        <div style={{
+          position:      "absolute",
+          top:           "50%",
+          left:          `${pos}%`,
+          transform:     "translate(-50%, -50%)",
+          width:          38,
+          height:         38,
+          borderRadius:  "50%",
+          background:    "white",
+          boxShadow:     "0 2px 8px rgba(0,0,0,0.35)",
+          display:       "flex",
+          alignItems:    "center",
+          justifyContent:"center",
+          pointerEvents: "none",
+          transition:    isDragging ? "none" : "left 0.05s",
+        }}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M5 4L2 8L5 12" stroke="#374151" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M11 4L14 8L11 12" stroke="#374151" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </div>
+
+        {/* ── Corner labels ── */}
+        <div style={{
+          position:     "absolute",
+          top:          10,
+          left:         10,
+          padding:      "3px 8px",
+          borderRadius: 99,
+          background:   "rgba(0,0,0,0.55)",
+          color:        "white",
+          fontSize:     "0.72rem",
+          fontWeight:   700,
+          backdropFilter: "blur(4px)",
+          pointerEvents: "none",
+        }}>
+          🧠 Original
+        </div>
+
+        <div style={{
+          position:     "absolute",
+          top:          10,
+          right:        10,
+          padding:      "3px 8px",
+          borderRadius: 99,
+          background:   "rgba(0,0,0,0.55)",
+          color:        "white",
+          fontSize:     "0.72rem",
+          fontWeight:   700,
+          backdropFilter: "blur(4px)",
+          pointerEvents: "none",
+          ...label.badgeStyle,
+        }}>
+          {label.icon} {label.badge}
+        </div>
+
+        {/* ── Invisible full-area range input for accessibility + mobile ── */}
+        <input
+          type="range"
+          min="0"
+          max="100"
+          value={pos}
+          onChange={(e) => setPos(Number(e.target.value))}
+          aria-label="Slide to compare original and overlay"
+          style={{
+            position:  "absolute",
+            inset:     0,
+            width:     "100%",
+            height:    "100%",
+            opacity:   0,
+            cursor:    "ew-resize",
+            margin:    0,
+          }}
+        />
+      </div>
+
+      {/* ── Slider position indicator ── */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+        <span style={{ fontSize: "0.72rem", color: "var(--color-text-light)", minWidth: 52 }}>
+          🧠 Original
+        </span>
+        <div style={{ flex: 1, height: 3, background: "var(--color-bg-tertiary, #f3f4f6)", borderRadius: 99, overflow: "hidden" }}>
+          <div style={{
+            height:     "100%",
+            width:      `${pos}%`,
+            background: "linear-gradient(to right, #6b7280, var(--color-primary, #e60023))",
+            borderRadius: 99,
+            transition: isDragging ? "none" : "width 0.05s",
+          }} />
+        </div>
+        <span style={{ fontSize: "0.72rem", color: "var(--color-text-light)", minWidth: 68, textAlign: "right" }}>
+          {label.icon} {label.badge}
+        </span>
+      </div>
+
+      {/* ── Info boxes ── */}
+      <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+        {overlay === "segment" && segmentImage && (
+          <div style={{
+            display: "flex", gap: 10, alignItems: "flex-start",
+            background: "#f0fdf4", border: "1px solid #bbf7d0",
+            borderRadius: "var(--radius-md, 10px)", padding: "11px 14px",
+          }}>
+            <svg style={{ width: 16, height: 16, flexShrink: 0, marginTop: 2, color: "#16a34a" }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <p style={{ margin: 0, fontSize: "0.78rem", color: "#14532d", lineHeight: 1.55 }}>
+              The <strong>yellow overlay</strong> shows the high-activation region derived by thresholding the Grad-CAM heatmap — where ResNet50V2 focused to predict <strong>{className}</strong>. This is the approximate tumour region, not a pixel-level boundary.
+            </p>
+          </div>
+        )}
+
+        {overlay === "gradcam" && gradcamImage && (
+          <div style={{
+            display: "flex", gap: 10, alignItems: "flex-start",
+            background: "#fffbeb", border: "1px solid #fde68a",
+            borderRadius: "var(--radius-md, 10px)", padding: "11px 14px",
+          }}>
+            <svg style={{ width: 16, height: 16, flexShrink: 0, marginTop: 2, color: "#d97706" }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <div>
+              <p style={{ margin: 0, fontSize: "0.78rem", color: "#78350f", lineHeight: 1.55 }}>
+                Grad-CAM from <code style={{ background: "rgba(0,0,0,0.07)", padding: "1px 5px", borderRadius: 3 }}>conv5_block3_out</code> — shows classifier attention, <strong>not anatomical tumour boundary</strong>. Use the Tumour Region overlay for localisation.
               </p>
-              <div style={imgWrapStyle}>
-                {originalURL && (
-                  <img src={originalURL} alt="Original MRI scan" style={imgStyle} />
-                )}
-              </div>
-              <p style={captionStyle}>Uploaded scan — unprocessed</p>
-            </div>
-
-            {/* ── Card 2: Segmentation (PRIMARY) ── */}
-            {segmentImage && (
-              <div
-                style={{
-                  ...cardStyle,
-                  border:"2px solid #16a34a",
-                  boxShadow:"0 0 0 4px #dcfce7",
-                }}
-              >
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:6 }}>
-                  <p style={cardTitleStyle}>
-                    <span>🎯</span> Tumour Region
-                  </p>
-                  <span style={primaryBadge}>
-                    ✓ Primary Output
-                  </span>
-                </div>
-
-                <div style={imgWrapStyle}>
-                  <img
-                    src={`data:image/jpeg;base64,${segmentImage}`}
-                    alt="Tumour region overlay"
-                    style={imgStyle}
-                  />
-                </div>
-
-                {/* Yellow swatch legend */}
-                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                  <div style={{
-                    width:12, height:12, borderRadius:3, flexShrink:0,
-                    background:"#FFE000",
-                    border:"1.5px solid #b45309",
-                  }} />
-                  <span style={captionStyle}>Yellow = high-activation region</span>
-                </div>
-
-                <p style={{ ...captionStyle, color:"var(--color-text-secondary,#374151)" }}>
-                  Region where the classifier focused most strongly — derived from Grad-CAM thresholding.
-                </p>
-              </div>
-            )}
-
-            {/* ── Card 3: Grad-CAM (EXPLAINABILITY) ── */}
-            {gradcamImage && (
-              <div style={{ ...cardStyle, opacity:0.92 }}>
-                {/* Header row */}
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:6 }}>
-                  <p style={cardTitleStyle}>
-                    <span>🔥</span> Grad-CAM
-                  </p>
-                  <span style={explainBadge}>
-                    Explainability only
-                  </span>
-                </div>
-
-                <div style={imgWrapStyle}>
-                  <img
-                    src={`data:image/png;base64,${gradcamImage}`}
-                    alt="Grad-CAM heatmap overlay"
-                    style={imgStyle}
-                  />
-                </div>
-
-                {/* Jet legend */}
-                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                  <span style={captionStyle}>Low</span>
-                  <div style={{
-                    flex:1, height:6, borderRadius:3,
-                    background:"linear-gradient(to right,#00008b,#0000ff,#00ffff,#00ff00,#ffff00,#ff7f00,#ff0000)",
-                  }} />
-                  <span style={captionStyle}>High</span>
-                </div>
-
-                <p style={{ ...captionStyle, color:"var(--color-text-secondary,#374151)" }}>
-                  Shows which regions of the scan activated the <strong>{className}</strong> classifier.{" "}
-                  <strong>Does not indicate tumour location</strong> — use Segmentation for that.
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* ── Info boxes ── */}
-          <div style={{ marginTop:"var(--spacing-lg,20px)", display:"flex", flexDirection:"column", gap:10 }}>
-
-            {/* Segmentation info */}
-            <div
-              className="alert"
-              style={{
-                background:"#f0fdf4",
-                border:"1px solid #bbf7d0",
-                color:"#14532d",
-                display:"flex", gap:10, alignItems:"flex-start",
-                padding:"12px 16px", borderRadius:"var(--radius-md,10px)",
-              }}
-            >
-              <svg style={{ width:18, height:18, flexShrink:0, marginTop:2 }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <div>
-                <p style={{ fontWeight:700, marginBottom:2, fontSize:"0.875rem" }}>
-                  About Tumour Region Overlay
-                </p>
-                <p style={{ margin:0, fontSize:"0.8rem", lineHeight:1.5 }}>
-                  The yellow overlay is derived by thresholding the <strong>Grad-CAM heatmap</strong> from
-                  ResNet50V2 — the same model that made the classification. The high-activation region
-                  (where the classifier focused most) is extracted, smoothed, and overlaid. This is
-                  technically consistent: one model, one image, no dataset mismatch. It shows the
-                  approximate tumour region, not a precise pixel-level boundary.
-                </p>
-              </div>
-            </div>
-
-            {/* Grad-CAM warning */}
-            <div
-              className="alert"
-              style={{
-                background:"#fffbeb",
-                border:"1px solid #fde68a",
-                color:"#78350f",
-                display:"flex", gap:10, alignItems:"flex-start",
-                padding:"12px 16px", borderRadius:"var(--radius-md,10px)",
-              }}
-            >
-              <svg style={{ width:18, height:18, flexShrink:0, marginTop:2 }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <div>
-                <p style={{ fontWeight:700, marginBottom:2, fontSize:"0.875rem" }}>
-                  About Grad-CAM (Explainability Tool)
-                </p>
-                <p style={{ margin:0, fontSize:"0.8rem", lineHeight:1.5 }}>
-                  Grad-CAM uses gradients from <code style={{ background:"rgba(0,0,0,0.08)", padding:"1px 5px", borderRadius:3 }}>conv5_block3_out</code> of
-                  ResNet50V2 to show which regions most activated the predicted class. It reflects the
-                  classifier's attention — <strong>not the anatomical tumour boundary</strong>.
-                  The heatmap may highlight areas outside the tumour; this is expected behaviour
-                  for an ImageNet-pretrained backbone. Use the Segmentation output for tumour localisation.
-                </p>
+              {/* Jet colormap legend */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 7 }}>
+                <span style={{ fontSize: "0.68rem", color: "#92400e" }}>Low</span>
+                <div style={{ flex: 1, height: 5, borderRadius: 3, background: "linear-gradient(to right,#00008b,#0000ff,#00ffff,#00ff00,#ffff00,#ff7f00,#ff0000)" }} />
+                <span style={{ fontSize: "0.68rem", color: "#92400e" }}>High</span>
               </div>
             </div>
           </div>
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 };
