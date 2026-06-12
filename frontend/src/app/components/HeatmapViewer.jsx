@@ -178,7 +178,7 @@ const HeatmapViewer = ({ image, gradcamImage, segmentImage, className }) => {
           <div style={{
             position:  "absolute",
             inset:     0,
-            clipPath:  `inset(0 ${100 - pos}% 0 0)`,
+            clipPath:  `inset(0 0 0 ${100 - pos}%)`,
             transition: isDragging ? "none" : "clip-path 0.05s",
           }}>
             <img
@@ -286,11 +286,19 @@ const HeatmapViewer = ({ image, gradcamImage, segmentImage, className }) => {
         <span style={{ fontSize: "0.72rem", color: "var(--color-text-light)", minWidth: 52 }}>
           🧠 Original
         </span>
-        <div style={{ flex: 1, height: 3, background: "var(--color-bg-tertiary, #f3f4f6)", borderRadius: 99, overflow: "hidden" }}>
+        {/* Two-tone track: grey=original left, red=overlay right */}
+        <div style={{ flex: 1, height: 3, background: "var(--color-bg-tertiary, #f3f4f6)", borderRadius: 99, overflow: "hidden", position: "relative" }}>
           <div style={{
-            height:     "100%",
+            position: "absolute", left: 0, top: 0, bottom: 0,
             width:      `${pos}%`,
-            background: "linear-gradient(to right, #6b7280, var(--color-primary, #e60023))",
+            background: "#9ca3af",
+            borderRadius: 99,
+            transition: isDragging ? "none" : "width 0.05s",
+          }} />
+          <div style={{
+            position: "absolute", right: 0, top: 0, bottom: 0,
+            width:      `${100 - pos}%`,
+            background: "var(--color-primary, #e60023)",
             borderRadius: 99,
             transition: isDragging ? "none" : "width 0.05s",
           }} />
