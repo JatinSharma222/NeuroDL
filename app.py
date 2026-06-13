@@ -1,7 +1,7 @@
 """
 app.py
 ──────
-NeuroDL v2.0 — Flask API with JWT authentication.
+NeuroDL v2.0 — Flask API with JWT authentication + Flask-SocketIO.
 
 Public endpoints:
   GET  /                     — health check
@@ -14,14 +14,17 @@ Protected endpoints (require Authorization: Bearer <token>):
   GET    /patients           — list own patients
   GET    /patients/<id>      — single patient + scan
   DELETE /patients/<id>      — delete patient
-  POST   /predict            — MRI analysis
-  GET    /history            — own scan history
+  POST   /predict            — MRI analysis (emits socket progress)
+  GET    /history            — own scan history (search, min_confidence, dates)
   GET    /history/<id>       — single scan
   DELETE /history/<id>       — delete scan
+  GET    /stats              — analytics for current user
+  POST   /auth/refresh       — refresh JWT token
 """
 
 import base64
 import os
+import time                        # FIX 4: moved to top-level
 import traceback
 from io import BytesIO
 
@@ -46,6 +49,7 @@ from src.database import (
     get_scan_by_id,
     get_scans,
     get_user_by_email,
+    get_user_by_id,
     init_db,
     save_scan,
 )
@@ -62,24 +66,12 @@ load_dotenv()
 app = Flask(__name__)
 socketio = SocketIO(
     app,
-    cors_allowed_origins="*",   # tighten in production
-    async_mode="threading",     # works with Flask dev server + gunicorn
+    cors_allowed_origins="*",
+    async_mode="threading",
     logger=False,
     engineio_logger=False,
 )
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
-
-@app.before_request
-def handle_options():
-    """Return 200 immediately for all OPTIONS preflight requests."""
-    from flask import request as req
-    if req.method == "OPTIONS":
-        from flask import make_response
-        resp = make_response("", 200)
-        resp.headers["Access-Control-Allow-Origin"]  = "*"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-        return resp
 
 CLASS_NAMES = {
     0: "Glioma Tumor",
@@ -90,6 +82,19 @@ CLASS_NAMES = {
 
 classification_model = None
 app_initialized      = False
+
+
+# ─── CORS preflight ───────────────────────────────────────────────────────────
+
+@app.before_request
+def handle_options():
+    if request.method == "OPTIONS":
+        from flask import make_response
+        resp = make_response("", 200)
+        resp.headers["Access-Control-Allow-Origin"]  = "*"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        return resp
 
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
@@ -108,18 +113,30 @@ def load_models():
     print("ALL SYSTEMS READY")
     print("=" * 60 + "\n")
 
- def emit_progress(socket_id: str, step: str, status: str,
+
+@app.before_request
+def initialize():
+    global app_initialized
+    if not app_initialized:
+        load_models()
+        app_initialized = True
+
+
+# ─── Socket progress helper ───────────────────────────────────────────────────
+# FIX 1: was indented with a leading space, causing SyntaxError.
+# Must be at module level, NOT inside load_models().
+
+def emit_progress(socket_id: str, step: str, status: str,
                   message: str = "", duration: float = None):
     """
     Emit a pipeline progress event to a specific socket client.
- 
+
     Args:
-        socket_id : The socket.id sent by the frontend in the form data
-        step      : One of preprocess | resnet | custom_cnn | meta_model |
-                            gradcam | segmentation | report
+        socket_id : socket.id sent by the frontend in form data
+        step      : preprocess | resnet | gradcam | segmentation | report
         status    : 'running' | 'done' | 'error'
-        message   : Optional detail string
-        duration  : Seconds taken (for 'done' events)
+        message   : optional detail string
+        duration  : seconds taken (for 'done' events)
     """
     if not socket_id:
         return
@@ -133,15 +150,7 @@ def load_models():
         },
         room=socket_id,
         namespace="/",
-    )   
-
-
-@app.before_request
-def initialize():
-    global app_initialized
-    if not app_initialized:
-        load_models()
-        app_initialized = True
+    )
 
 
 # ─── Health Check ─────────────────────────────────────────────────────────────
@@ -170,33 +179,18 @@ def register():
     password  = data.get("password",  "")
 
     errors = []
-    if not full_name:
-        errors.append("Full name is required")
-    if not email or "@" not in email:
-        errors.append("Valid email is required")
-    if not password or len(password) < 8:
-        errors.append("Password must be at least 8 characters")
+    if not full_name:                        errors.append("Full name is required")
+    if not email or "@" not in email:        errors.append("Valid email is required")
+    if not password or len(password) < 8:   errors.append("Password must be at least 8 characters")
     if errors:
         return jsonify({"error": "Validation failed", "details": errors}), 400
 
     try:
         hashed = hash_password(password)
-        user   = create_user(
-            email         = email,
-            password_hash = hashed,
-            full_name     = full_name,
-        )
-        token = create_token(
-            user_id   = user.id,
-            email     = user.email,
-            full_name = user.full_name,
-        )
+        user   = create_user(email=email, password_hash=hashed, full_name=full_name)
+        token  = create_token(user_id=user.id, email=user.email, full_name=user.full_name)
         print(f"[AUTH] Registered — {email}")
-        return jsonify({
-            "token": token,
-            "user":  user.to_dict(),
-        }), 201
-
+        return jsonify({"token": token, "user": user.to_dict()}), 201
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 409
     except Exception:
@@ -221,17 +215,9 @@ def login():
         if not user or not verify_password(password, user.password_hash):
             return jsonify({"error": "Invalid email or password"}), 401
 
-        token = create_token(
-            user_id   = user.id,
-            email     = user.email,
-            full_name = user.full_name,
-        )
+        token = create_token(user_id=user.id, email=user.email, full_name=user.full_name)
         print(f"[AUTH] Login — {email}")
-        return jsonify({
-            "token": token,
-            "user":  user.to_dict(),
-        }), 200
-
+        return jsonify({"token": token, "user": user.to_dict()}), 200
     except Exception:
         print(f"[AUTH] Login error: {traceback.format_exc()}")
         return jsonify({"error": "Login failed"}), 500
@@ -245,6 +231,20 @@ def me(current_user):
         "email":     current_user["email"],
         "full_name": current_user["full_name"],
     }), 200
+
+
+@app.route("/auth/refresh", methods=["POST"])
+@require_auth
+def refresh_token(current_user):
+    try:
+        user = get_user_by_id(int(current_user["sub"]))
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        new_token = create_token(user.id, user.email, user.full_name)
+        return jsonify({"token": new_token, "user": user.to_dict()}), 200
+    except Exception:
+        print(f"[Auth] Refresh error:\n{traceback.format_exc()}")
+        return jsonify({"error": "Token refresh failed"}), 500
 
 
 # ─── Patient Routes ───────────────────────────────────────────────────────────
@@ -261,14 +261,11 @@ def register_patient(current_user):
     gender = data.get("gender", "").strip()
 
     errors = []
-    if not name:
-        errors.append("name is required")
-    if age is None:
-        errors.append("age is required")
+    if not name:   errors.append("name is required")
+    if age is None: errors.append("age is required")
     elif not str(age).isdigit() or not (0 < int(age) < 130):
         errors.append("age must be between 1 and 129")
-    if not gender:
-        errors.append("gender is required")
+    if not gender: errors.append("gender is required")
     if errors:
         return jsonify({"error": "Validation failed", "details": errors}), 400
 
@@ -279,13 +276,10 @@ def register_patient(current_user):
             gender   = gender,
             phone    = data.get("phone"),
             symptoms = data.get("symptoms"),
-            user_id  = int(current_user["sub"]),   # ← sub is now string, cast to int
+            user_id  = int(current_user["sub"]),
         )
         print(f"[PATIENT] Registered — id={patient_id}, user={current_user['email']}")
-        return jsonify({
-            "patient_id": patient_id,
-            "message":    f"Patient '{name}' registered successfully",
-        }), 201
+        return jsonify({"patient_id": patient_id, "message": f"Patient '{name}' registered successfully"}), 201
     except Exception:
         print(f"[PATIENT] Error: {traceback.format_exc()}")
         return jsonify({"error": "Failed to register patient"}), 500
@@ -295,14 +289,11 @@ def register_patient(current_user):
 @require_auth
 def list_patients(current_user):
     try:
-        page     = max(1, int(request.args.get("page",     1)))
-        per_page = max(1, min(int(request.args.get("per_page", 20)), 100))
-        search   = request.args.get("search")
-        result   = get_patients(
-            page     = page,
-            per_page = per_page,
-            search   = search,
-            user_id  = int(current_user["sub"]),   # ← cast to int
+        result = get_patients(
+            page     = max(1, int(request.args.get("page", 1))),
+            per_page = max(1, min(int(request.args.get("per_page", 20)), 100)),
+            search   = request.args.get("search"),
+            user_id  = int(current_user["sub"]),
         )
         return jsonify(result), 200
     except ValueError:
@@ -318,7 +309,7 @@ def patient_detail(current_user, patient_id):
         patient = get_patient_by_id(patient_id)
         if not patient:
             return jsonify({"error": f"Patient {patient_id} not found"}), 404
-        if patient.get("user_id") != int(current_user["sub"]):   # ← cast to int
+        if patient.get("user_id") != int(current_user["sub"]):
             return jsonify({"error": "Forbidden"}), 403
         return jsonify(patient), 200
     except Exception:
@@ -332,7 +323,7 @@ def patient_delete(current_user, patient_id):
         patient = get_patient_by_id(patient_id)
         if not patient:
             return jsonify({"error": f"Patient {patient_id} not found"}), 404
-        if patient.get("user_id") != int(current_user["sub"]):   # ← cast to int
+        if patient.get("user_id") != int(current_user["sub"]):
             return jsonify({"error": "Forbidden"}), 403
         delete_patient(patient_id)
         return jsonify({"message": f"Patient {patient_id} deleted"}), 200
@@ -341,236 +332,196 @@ def patient_delete(current_user, patient_id):
 
 
 # ─── Predict Route ────────────────────────────────────────────────────────────
+# FIX 2: restored the real working predict logic (was fully commented out and
+#         replaced with broken placeholders like resnet_model.predict(...) ).
+#         Socket emit calls added at each pipeline stage.
 
- 
-import time
- 
 @app.route("/predict", methods=["POST"])
 @require_auth
 def predict(current_user):
-    socket_id = request.form.get("socket_id")   # ← ADD THIS LINE
- 
+    socket_id = request.form.get("socket_id")   # from APIRequest.jsx
+
+    if "image" not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+
+    raw_pid    = request.form.get("patient_id", "").strip()
+    patient_id = int(raw_pid) if raw_pid.isdigit() else None
+
+    print(f"\n{'='*55}")
+    print(f"[PREDICT] User      : {current_user['email']}")
+    print(f"[PREDICT] File      : {file.filename}")
+    print(f"[PREDICT] Patient ID: {patient_id or 'not provided'}")
+    print(f"[PREDICT] Socket ID : {socket_id or 'none'}")
+    print(f"{'='*55}")
+
     try:
-        # ── 1. Preprocess ──────────────────────────────────────
+        # ── Stage 1: Preprocess ───────────────────────────────────
         emit_progress(socket_id, "preprocess", "running")
         t0 = time.time()
- 
-        file  = request.files.get("image")
-        image = load_image(file)                     # your existing call
-        img_c = preprocess_classification(image)     # your existing call
-        img_s = preprocess_segmentation(image)       # your existing call
- 
-        emit_progress(socket_id, "preprocess", "done", duration=time.time()-t0)
- 
-        # ── 2. ResNet50V2 ──────────────────────────────────────
+
+        image_np     = load_image(file)
+        preprocessed = preprocess_classification(image_np)
+
+        emit_progress(socket_id, "preprocess", "done", duration=round(time.time() - t0, 2))
+
+        # ── Stage 2: ResNet50V2 classification ────────────────────
         emit_progress(socket_id, "resnet", "running")
         t0 = time.time()
- 
-        resnet_preds = resnet_model.predict(img_c, verbose=0)   # your existing call
- 
-        emit_progress(socket_id, "resnet", "done", duration=time.time()-t0)
- 
-        # ── 3. Custom CNN ──────────────────────────────────────
-        emit_progress(socket_id, "custom_cnn", "running")
-        t0 = time.time()
- 
-        custom_preds = custom_model.predict(img_c, verbose=0)   # your existing call
- 
-        emit_progress(socket_id, "custom_cnn", "done", duration=time.time()-t0)
- 
-        # ── 4. Meta-model ──────────────────────────────────────
-        emit_progress(socket_id, "meta_model", "running")
-        t0 = time.time()
- 
-        combined   = process_predictions(resnet_preds, custom_preds)
-        meta_preds = meta_model.predict(combined, verbose=0)    # your existing call
- 
-        emit_progress(socket_id, "meta_model", "done", duration=time.time()-t0)
- 
-        # ── 5. Grad-CAM ────────────────────────────────────────
-        emit_progress(socket_id, "gradcam", "running")
-        t0 = time.time()
- 
-        gradcam_b64 = generate_gradcam(...)    # your existing call
- 
-        emit_progress(socket_id, "gradcam", "done", duration=time.time()-t0)
- 
-        # ── 6. Segmentation ────────────────────────────────────
-        emit_progress(socket_id, "segmentation", "running")
-        t0 = time.time()
- 
-        segment_b64 = your_segmentation_call(...)  # your existing call
- 
-        emit_progress(socket_id, "segmentation", "done", duration=time.time()-t0)
- 
-        # ── 7. LLM Report ──────────────────────────────────────
+
+        predictions     = classification_model.predict(preprocessed, verbose=0)
+        predicted_class = int(np.argmax(predictions[0]))
+        confidence      = float(predictions[0][predicted_class])
+        class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
+
+        emit_progress(socket_id, "resnet", "done", duration=round(time.time() - t0, 2))
+
+        class_probabilities = {
+            CLASS_NAMES[i]: float(predictions[0][i])
+            for i in range(len(predictions[0]))
+        }
+
+        print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
+
+        response = {
+            "final_class":             predicted_class,
+            "class_name":              class_name,
+            "confidence":              f"{confidence:.2%}",
+            "model_used":              "ResNet50V2",
+            "model_accuracy":          "94.92%",
+            "segmentation_performed":  False,
+            "gradcam_performed":       False,
+            "segment_image":           None,
+            "gradcam_image":           None,
+            "report":                  None,
+            "scan_id":                 None,
+            "patient_id":              patient_id,
+            "class_probabilities":     class_probabilities,
+        }
+
+        # ── Stage 3: Grad-CAM + Segmentation (tumour only) ────────
+        if predicted_class != 2:
+            print("[PREDICT] Tumour detected — running visual analysis...")
+            raw_heatmap = None
+
+            # Grad-CAM
+            emit_progress(socket_id, "gradcam", "running")
+            t0 = time.time()
+            try:
+                raw_heatmap = get_gradcam_heatmap(
+                    model     = classification_model,
+                    img_array = preprocessed,
+                    class_idx = predicted_class,
+                )
+            except Exception as e:
+                print(f"[PREDICT] ✗ Raw heatmap: {e}")
+
+            try:
+                gradcam_b64 = generate_gradcam(
+                    model          = classification_model,
+                    img_array      = preprocessed,
+                    class_idx      = predicted_class,
+                    original_image = image_np,
+                )
+                if gradcam_b64:
+                    response["gradcam_image"]     = gradcam_b64
+                    response["gradcam_performed"] = True
+                    print("[PREDICT] ✓ Grad-CAM complete")
+            except Exception as e:
+                print(f"[PREDICT] ✗ Grad-CAM: {e}")
+
+            emit_progress(socket_id, "gradcam", "done", duration=round(time.time() - t0, 2))
+
+            # Segmentation
+            emit_progress(socket_id, "segmentation", "running")
+            t0 = time.time()
+            if raw_heatmap is not None:
+                try:
+                    buf = gradcam_pseudo_segmentation(image=image_np, heatmap=raw_heatmap)
+                    buf.seek(0)
+                    response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
+                    response["segmentation_performed"] = True
+                    print("[PREDICT] ✓ Pseudo-segmentation complete")
+                except Exception as e:
+                    print(f"[PREDICT] ✗ Segmentation: {e}")
+            emit_progress(socket_id, "segmentation", "done", duration=round(time.time() - t0, 2))
+
+        else:
+            print("[PREDICT] No tumour — skipping visual analysis")
+
+        # ── Stage 4: LLM Report ───────────────────────────────────
         emit_progress(socket_id, "report", "running")
         t0 = time.time()
- 
-        report_text = generate_report(...)     # your existing Ollama call
- 
-        emit_progress(socket_id, "report", "done", duration=time.time()-t0)
- 
-        # ── Return result (unchanged) ──────────────────────────
-        return jsonify({ ... })                # your existing response
- 
-    except Exception as e:
-        emit_progress(socket_id, "preprocess", "error", message=str(e))
-        return jsonify({"error": str(e)}), 500
+        try:
+            patient_record = get_patient_by_id(patient_id) if patient_id else None
+            report_text    = generate_report(
+                class_name             = class_name,
+                confidence             = confidence,
+                segmentation_performed = response["segmentation_performed"],
+                gradcam_performed      = response["gradcam_performed"],
+                model_accuracy         = "94.92%",
+                patient_id             = patient_id,
+                patient_name     = patient_record.get("name")     if patient_record else current_user.get("full_name"),
+                patient_age      = patient_record.get("age")      if patient_record else None,
+                patient_gender   = patient_record.get("gender")   if patient_record else None,
+                patient_symptoms = patient_record.get("symptoms") if patient_record else None,
+            )
+            response["report"] = report_text
+            if report_text:
+                print(f"[PREDICT] ✓ Report generated ({len(report_text)} chars)")
+        except Exception as e:
+            print(f"[PREDICT] ✗ Report: {e}")
+        emit_progress(socket_id, "report", "done", duration=round(time.time() - t0, 2))
 
-# @app.route("/predict", methods=["POST"])
-# @require_auth
-# def predict(current_user):
-#     if "image" not in request.files:
-#         return jsonify({"error": "No image provided"}), 400
+        # ── Stage 5: Save to database ─────────────────────────────
+        try:
+            scan_id = save_scan(
+                predicted_class        = class_name,
+                confidence_score       = confidence,
+                segmentation_performed = response["segmentation_performed"],
+                gradcam_performed      = response["gradcam_performed"],
+                file_name              = file.filename,
+                report_text            = response["report"],
+                patient_id             = patient_id,
+            )
+            response["scan_id"] = scan_id
+            print(f"[PREDICT] ✓ Saved — scan_id={scan_id}\n")
+        except Exception as e:
+            print(f"[PREDICT] ✗ DB save: {e}")
 
-#     file = request.files["image"]
-#     if file.filename == "":
-#         return jsonify({"error": "Empty filename"}), 400
+        return jsonify(response), 200
 
-#     raw_pid    = request.form.get("patient_id", "").strip()
-#     patient_id = int(raw_pid) if raw_pid.isdigit() else None
-
-#     print(f"\n{'='*55}")
-#     print(f"[PREDICT] User      : {current_user['email']}")
-#     print(f"[PREDICT] File      : {file.filename}")
-#     print(f"[PREDICT] Patient ID: {patient_id or 'not provided'}")
-#     print(f"{'='*55}")
-
-#     try:
-#         # ── Step 1: Load + classify ───────────────────────────────
-#         image_np        = load_image(file)
-#         preprocessed    = preprocess_classification(image_np)
-#         predictions     = classification_model.predict(preprocessed, verbose=0)
-#         predicted_class = int(np.argmax(predictions[0]))
-#         confidence      = float(predictions[0][predicted_class])
-#         class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
-
-#         class_probabilities = {
-#         CLASS_NAMES[i]: float(predictions[0][i])
-#         for i in range(len(predictions[0]))
-#         }
-
-#         print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
-
-#         response = {
-#             "final_class":             predicted_class,
-#             "class_name":              class_name,
-#             "confidence":              f"{confidence:.2%}",
-#             "model_used":              "ResNet50V2",
-#             "model_accuracy":          "94.92%",
-#             "segmentation_performed":  False,
-#             "gradcam_performed":       False,
-#             "segment_image":           None,
-#             "gradcam_image":           None,
-#             "report":                  None,
-#             "scan_id":                 None,
-#             "patient_id":              patient_id,
-#             "class_probabilities": class_probabilities,
-#         }
-
-#         # ── Step 2: Visual analysis (tumour only) ─────────────────
-#         if predicted_class != 2:
-#             print("[PREDICT] Tumour detected — running visual analysis...")
-
-#             raw_heatmap = None
-#             try:
-#                 raw_heatmap = get_gradcam_heatmap(
-#                     model     = classification_model,
-#                     img_array = preprocessed,
-#                     class_idx = predicted_class,
-#                 )
-#             except Exception as e:
-#                 print(f"[PREDICT] ✗ Raw heatmap: {e}")
-
-#             try:
-#                 gradcam_b64 = generate_gradcam(
-#                     model          = classification_model,
-#                     img_array      = preprocessed,
-#                     class_idx      = predicted_class,
-#                     original_image = image_np,
-#                 )
-#                 if gradcam_b64:
-#                     response["gradcam_image"]     = gradcam_b64
-#                     response["gradcam_performed"] = True
-#                     print("[PREDICT] ✓ Grad-CAM complete")
-#             except Exception as e:
-#                 print(f"[PREDICT] ✗ Grad-CAM: {e}")
-
-#             if raw_heatmap is not None:
-#                 try:
-#                     buf = gradcam_pseudo_segmentation(
-#                         image   = image_np,
-#                         heatmap = raw_heatmap,
-#                     )
-#                     buf.seek(0)
-#                     response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
-#                     response["segmentation_performed"] = True
-#                     print("[PREDICT] ✓ Pseudo-segmentation complete")
-#                 except Exception as e:
-#                     print(f"[PREDICT] ✗ Segmentation: {e}")
-#         else:
-#             print("[PREDICT] No tumour — skipping visual analysis")
-
-#         # ── Step 3: LLM Report ────────────────────────────────────
-#         try:
-#             patient_record = get_patient_by_id(patient_id) if patient_id else None
-#             report_text    = generate_report(
-#                 class_name             = class_name,
-#                 confidence             = confidence,
-#                 segmentation_performed = response["segmentation_performed"],
-#                 gradcam_performed      = response["gradcam_performed"],
-#                 model_accuracy         = "94.92%",
-#                 patient_id             = patient_id,
-#                 patient_name           = patient_record.get("name")     if patient_record else current_user.get("full_name"),
-#                 patient_age            = patient_record.get("age")      if patient_record else None,
-#                 patient_gender         = patient_record.get("gender")   if patient_record else None,
-#                 patient_symptoms       = patient_record.get("symptoms") if patient_record else None,
-#             )
-#             response["report"] = report_text
-#             if report_text:
-#                 print(f"[PREDICT] ✓ Report generated ({len(report_text)} chars)")
-#         except Exception as e:
-#             print(f"[PREDICT] ✗ Report: {e}")
-
-#         # ── Step 4: Save to database ──────────────────────────────
-#         try:
-#             scan_id = save_scan(
-#                 predicted_class        = class_name,
-#                 confidence_score       = confidence,
-#                 segmentation_performed = response["segmentation_performed"],
-#                 gradcam_performed      = response["gradcam_performed"],
-#                 file_name              = file.filename,
-#                 report_text            = response["report"],
-#                 patient_id             = patient_id,
-#             )
-#             response["scan_id"] = scan_id
-#             print(f"[PREDICT] ✓ Saved — scan_id={scan_id}\n")
-#         except Exception as e:
-#             print(f"[PREDICT] ✗ DB save: {e}")
-
-#         return jsonify(response), 200
-
-#     except ValueError as ve:
-#         return jsonify({"error": "Invalid file", "message": str(ve)}), 400
-#     except Exception:
-#         print(f"[PREDICT] Unexpected error:\n{traceback.format_exc()}")
-#         return jsonify({"error": "Prediction failed"}), 500
+    except ValueError as ve:
+        emit_progress(socket_id, "preprocess", "error", message=str(ve))
+        return jsonify({"error": "Invalid file", "message": str(ve)}), 400
+    except Exception:
+        emit_progress(socket_id, "preprocess", "error", message="Unexpected error")
+        print(f"[PREDICT] Unexpected error:\n{traceback.format_exc()}")
+        return jsonify({"error": "Prediction failed"}), 500
 
 
 # ─── Scan History Routes ──────────────────────────────────────────────────────
+# FIX 3: /history now forwards search and min_confidence to get_scans()
 
 @app.route("/history", methods=["GET"])
 @require_auth
 def history(current_user):
     try:
+        raw_min_conf   = request.args.get("min_confidence")
+        min_confidence = float(raw_min_conf) if raw_min_conf else None
+
         result = get_scans(
-            page       = max(1, int(request.args.get("page",     1))),
-            per_page   = max(1, min(int(request.args.get("per_page", 20)), 100)),
-            class_name = request.args.get("class_name"),
-            date_from  = request.args.get("date_from"),
-            date_to    = request.args.get("date_to"),
-            user_id    = int(current_user["sub"]),   # ← cast to int
+            page           = max(1, int(request.args.get("page",     1))),
+            per_page       = max(1, int(request.args.get("per_page", 20))),
+            class_name     = request.args.get("class_name"),
+            date_from      = request.args.get("date_from"),
+            date_to        = request.args.get("date_to"),
+            user_id        = int(current_user["sub"]),
+            search         = request.args.get("search"),       # ← wired up
+            min_confidence = min_confidence,                    # ← wired up
         )
         return jsonify(result), 200
     except ValueError:
@@ -603,36 +554,11 @@ def history_delete(current_user, scan_id):
         return jsonify({"error": "Failed to delete scan"}), 500
 
 
-# ─── Token Refresh ───────────────────────────────────────────────────────────
-
-@app.route("/auth/refresh", methods=["POST"])
-@require_auth
-def refresh_token(current_user):
-    """
-    Issues a fresh JWT for an already-authenticated user.
-    Frontend calls this on 401 to silently re-authenticate without
-    forcing the user to log in again.
-    """
-    try:
-        user = get_user_by_id(int(current_user["sub"]))
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        new_token = create_token(user.id, user.email, user.full_name)
-        return jsonify({
-            "token": new_token,
-            "user":  user.to_dict(),
-        }), 200
-    except Exception:
-        print(f"[Auth] Refresh error:\n{traceback.format_exc()}")
-        return jsonify({"error": "Token refresh failed"}), 500
-
-
-# ─── Stats / Analytics Endpoint ──────────────────────────────────────────────
+# ─── Stats / Analytics ────────────────────────────────────────────────────────
 
 @app.route("/stats", methods=["GET"])
 @require_auth
 def stats(current_user):
-    """Aggregated analytics for the authenticated user's scans."""
     try:
         from collections import defaultdict
         from datetime import datetime, timedelta
@@ -644,8 +570,7 @@ def stats(current_user):
             db.query(Scan)
             .join(Patient, Scan.patient_id == Patient.id, isouter=True)
             .filter(
-                (Patient.user_id == user_id) |
-                (Scan.patient_id == None)
+                (Patient.user_id == user_id) | (Scan.patient_id == None)
             )
             .all()
         )
@@ -659,7 +584,6 @@ def stats(current_user):
                 "scans_per_day": [], "feature_usage": {"segmentation": 0, "gradcam": 0, "report": 0},
             }), 200
 
-        from collections import defaultdict
         class_counts = defaultdict(int)
         class_conf   = defaultdict(list)
         for s in scans:
@@ -680,16 +604,10 @@ def stats(current_user):
                     day_map[d.isoformat()] += 1
 
         scans_per_day = [
-            {"date": (today - timedelta(days=i)).isoformat(),
+            {"date":  (today - timedelta(days=i)).isoformat(),
              "count": day_map.get((today - timedelta(days=i)).isoformat(), 0)}
             for i in range(29, -1, -1)
         ]
-
-        feature_usage = {
-            "segmentation": sum(1 for s in scans if s.segmentation_performed),
-            "gradcam":       sum(1 for s in scans if s.gradcam_performed),
-            "report":        sum(1 for s in scans if s.report_text),
-        }
 
         all_conf    = [s.confidence_score for s in scans]
         overall_avg = round(sum(all_conf) / len(all_conf), 4)
@@ -700,7 +618,11 @@ def stats(current_user):
             "avg_confidence":         avg_confidence,
             "overall_avg_confidence": overall_avg,
             "scans_per_day":          scans_per_day,
-            "feature_usage":          feature_usage,
+            "feature_usage": {
+                "segmentation": sum(1 for s in scans if s.segmentation_performed),
+                "gradcam":      sum(1 for s in scans if s.gradcam_performed),
+                "report":       sum(1 for s in scans if s.report_text),
+            },
         }), 200
 
     except Exception:
@@ -727,5 +649,5 @@ def server_error(e):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
-    print(f"\n NeuroDL v2.0  |  port={port}  |  PostgreSQL  |  JWT auth\n")
-    socketio.run(app, debug=True, port=5001, allow_unsafe_werkzeug=True)
+    print(f"\n NeuroDL v2.0  |  port={port}  |  PostgreSQL  |  JWT auth  |  SocketIO\n")
+    socketio.run(app, debug=True, port=port, allow_unsafe_werkzeug=True)
