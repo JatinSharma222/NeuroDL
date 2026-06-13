@@ -29,6 +29,7 @@ import numpy as np
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_socketio import SocketIO
 
 from src.auth import create_token, hash_password, require_auth, verify_password
 from src.config import RESNET50_MODEL_PATH
@@ -59,6 +60,13 @@ from src.utils import load_local_model
 load_dotenv()
 
 app = Flask(__name__)
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",   # tighten in production
+    async_mode="threading",     # works with Flask dev server + gunicorn
+    logger=False,
+    engineio_logger=False,
+)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 @app.before_request
@@ -99,6 +107,33 @@ def load_models():
     print("\n" + "=" * 60)
     print("ALL SYSTEMS READY")
     print("=" * 60 + "\n")
+
+ def emit_progress(socket_id: str, step: str, status: str,
+                  message: str = "", duration: float = None):
+    """
+    Emit a pipeline progress event to a specific socket client.
+ 
+    Args:
+        socket_id : The socket.id sent by the frontend in the form data
+        step      : One of preprocess | resnet | custom_cnn | meta_model |
+                            gradcam | segmentation | report
+        status    : 'running' | 'done' | 'error'
+        message   : Optional detail string
+        duration  : Seconds taken (for 'done' events)
+    """
+    if not socket_id:
+        return
+    socketio.emit(
+        "progress",
+        {
+            "step":     step,
+            "status":   status,
+            "message":  message,
+            "duration": duration,
+        },
+        room=socket_id,
+        namespace="/",
+    )   
 
 
 @app.before_request
@@ -307,144 +342,220 @@ def patient_delete(current_user, patient_id):
 
 # ─── Predict Route ────────────────────────────────────────────────────────────
 
+ 
+import time
+ 
 @app.route("/predict", methods=["POST"])
 @require_auth
 def predict(current_user):
-    if "image" not in request.files:
-        return jsonify({"error": "No image provided"}), 400
-
-    file = request.files["image"]
-    if file.filename == "":
-        return jsonify({"error": "Empty filename"}), 400
-
-    raw_pid    = request.form.get("patient_id", "").strip()
-    patient_id = int(raw_pid) if raw_pid.isdigit() else None
-
-    print(f"\n{'='*55}")
-    print(f"[PREDICT] User      : {current_user['email']}")
-    print(f"[PREDICT] File      : {file.filename}")
-    print(f"[PREDICT] Patient ID: {patient_id or 'not provided'}")
-    print(f"{'='*55}")
-
+    socket_id = request.form.get("socket_id")   # ← ADD THIS LINE
+ 
     try:
-        # ── Step 1: Load + classify ───────────────────────────────
-        image_np        = load_image(file)
-        preprocessed    = preprocess_classification(image_np)
-        predictions     = classification_model.predict(preprocessed, verbose=0)
-        predicted_class = int(np.argmax(predictions[0]))
-        confidence      = float(predictions[0][predicted_class])
-        class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
+        # ── 1. Preprocess ──────────────────────────────────────
+        emit_progress(socket_id, "preprocess", "running")
+        t0 = time.time()
+ 
+        file  = request.files.get("image")
+        image = load_image(file)                     # your existing call
+        img_c = preprocess_classification(image)     # your existing call
+        img_s = preprocess_segmentation(image)       # your existing call
+ 
+        emit_progress(socket_id, "preprocess", "done", duration=time.time()-t0)
+ 
+        # ── 2. ResNet50V2 ──────────────────────────────────────
+        emit_progress(socket_id, "resnet", "running")
+        t0 = time.time()
+ 
+        resnet_preds = resnet_model.predict(img_c, verbose=0)   # your existing call
+ 
+        emit_progress(socket_id, "resnet", "done", duration=time.time()-t0)
+ 
+        # ── 3. Custom CNN ──────────────────────────────────────
+        emit_progress(socket_id, "custom_cnn", "running")
+        t0 = time.time()
+ 
+        custom_preds = custom_model.predict(img_c, verbose=0)   # your existing call
+ 
+        emit_progress(socket_id, "custom_cnn", "done", duration=time.time()-t0)
+ 
+        # ── 4. Meta-model ──────────────────────────────────────
+        emit_progress(socket_id, "meta_model", "running")
+        t0 = time.time()
+ 
+        combined   = process_predictions(resnet_preds, custom_preds)
+        meta_preds = meta_model.predict(combined, verbose=0)    # your existing call
+ 
+        emit_progress(socket_id, "meta_model", "done", duration=time.time()-t0)
+ 
+        # ── 5. Grad-CAM ────────────────────────────────────────
+        emit_progress(socket_id, "gradcam", "running")
+        t0 = time.time()
+ 
+        gradcam_b64 = generate_gradcam(...)    # your existing call
+ 
+        emit_progress(socket_id, "gradcam", "done", duration=time.time()-t0)
+ 
+        # ── 6. Segmentation ────────────────────────────────────
+        emit_progress(socket_id, "segmentation", "running")
+        t0 = time.time()
+ 
+        segment_b64 = your_segmentation_call(...)  # your existing call
+ 
+        emit_progress(socket_id, "segmentation", "done", duration=time.time()-t0)
+ 
+        # ── 7. LLM Report ──────────────────────────────────────
+        emit_progress(socket_id, "report", "running")
+        t0 = time.time()
+ 
+        report_text = generate_report(...)     # your existing Ollama call
+ 
+        emit_progress(socket_id, "report", "done", duration=time.time()-t0)
+ 
+        # ── Return result (unchanged) ──────────────────────────
+        return jsonify({ ... })                # your existing response
+ 
+    except Exception as e:
+        emit_progress(socket_id, "preprocess", "error", message=str(e))
+        return jsonify({"error": str(e)}), 500
 
-        class_probabilities = {
-        CLASS_NAMES[i]: float(predictions[0][i])
-        for i in range(len(predictions[0]))
-        }
+# @app.route("/predict", methods=["POST"])
+# @require_auth
+# def predict(current_user):
+#     if "image" not in request.files:
+#         return jsonify({"error": "No image provided"}), 400
 
-        print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
+#     file = request.files["image"]
+#     if file.filename == "":
+#         return jsonify({"error": "Empty filename"}), 400
 
-        response = {
-            "final_class":             predicted_class,
-            "class_name":              class_name,
-            "confidence":              f"{confidence:.2%}",
-            "model_used":              "ResNet50V2",
-            "model_accuracy":          "94.92%",
-            "segmentation_performed":  False,
-            "gradcam_performed":       False,
-            "segment_image":           None,
-            "gradcam_image":           None,
-            "report":                  None,
-            "scan_id":                 None,
-            "patient_id":              patient_id,
-            "class_probabilities": class_probabilities,
-        }
+#     raw_pid    = request.form.get("patient_id", "").strip()
+#     patient_id = int(raw_pid) if raw_pid.isdigit() else None
 
-        # ── Step 2: Visual analysis (tumour only) ─────────────────
-        if predicted_class != 2:
-            print("[PREDICT] Tumour detected — running visual analysis...")
+#     print(f"\n{'='*55}")
+#     print(f"[PREDICT] User      : {current_user['email']}")
+#     print(f"[PREDICT] File      : {file.filename}")
+#     print(f"[PREDICT] Patient ID: {patient_id or 'not provided'}")
+#     print(f"{'='*55}")
 
-            raw_heatmap = None
-            try:
-                raw_heatmap = get_gradcam_heatmap(
-                    model     = classification_model,
-                    img_array = preprocessed,
-                    class_idx = predicted_class,
-                )
-            except Exception as e:
-                print(f"[PREDICT] ✗ Raw heatmap: {e}")
+#     try:
+#         # ── Step 1: Load + classify ───────────────────────────────
+#         image_np        = load_image(file)
+#         preprocessed    = preprocess_classification(image_np)
+#         predictions     = classification_model.predict(preprocessed, verbose=0)
+#         predicted_class = int(np.argmax(predictions[0]))
+#         confidence      = float(predictions[0][predicted_class])
+#         class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
 
-            try:
-                gradcam_b64 = generate_gradcam(
-                    model          = classification_model,
-                    img_array      = preprocessed,
-                    class_idx      = predicted_class,
-                    original_image = image_np,
-                )
-                if gradcam_b64:
-                    response["gradcam_image"]     = gradcam_b64
-                    response["gradcam_performed"] = True
-                    print("[PREDICT] ✓ Grad-CAM complete")
-            except Exception as e:
-                print(f"[PREDICT] ✗ Grad-CAM: {e}")
+#         class_probabilities = {
+#         CLASS_NAMES[i]: float(predictions[0][i])
+#         for i in range(len(predictions[0]))
+#         }
 
-            if raw_heatmap is not None:
-                try:
-                    buf = gradcam_pseudo_segmentation(
-                        image   = image_np,
-                        heatmap = raw_heatmap,
-                    )
-                    buf.seek(0)
-                    response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
-                    response["segmentation_performed"] = True
-                    print("[PREDICT] ✓ Pseudo-segmentation complete")
-                except Exception as e:
-                    print(f"[PREDICT] ✗ Segmentation: {e}")
-        else:
-            print("[PREDICT] No tumour — skipping visual analysis")
+#         print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
 
-        # ── Step 3: LLM Report ────────────────────────────────────
-        try:
-            patient_record = get_patient_by_id(patient_id) if patient_id else None
-            report_text    = generate_report(
-                class_name             = class_name,
-                confidence             = confidence,
-                segmentation_performed = response["segmentation_performed"],
-                gradcam_performed      = response["gradcam_performed"],
-                model_accuracy         = "94.92%",
-                patient_id             = patient_id,
-                patient_name           = patient_record.get("name")     if patient_record else current_user.get("full_name"),
-                patient_age            = patient_record.get("age")      if patient_record else None,
-                patient_gender         = patient_record.get("gender")   if patient_record else None,
-                patient_symptoms       = patient_record.get("symptoms") if patient_record else None,
-            )
-            response["report"] = report_text
-            if report_text:
-                print(f"[PREDICT] ✓ Report generated ({len(report_text)} chars)")
-        except Exception as e:
-            print(f"[PREDICT] ✗ Report: {e}")
+#         response = {
+#             "final_class":             predicted_class,
+#             "class_name":              class_name,
+#             "confidence":              f"{confidence:.2%}",
+#             "model_used":              "ResNet50V2",
+#             "model_accuracy":          "94.92%",
+#             "segmentation_performed":  False,
+#             "gradcam_performed":       False,
+#             "segment_image":           None,
+#             "gradcam_image":           None,
+#             "report":                  None,
+#             "scan_id":                 None,
+#             "patient_id":              patient_id,
+#             "class_probabilities": class_probabilities,
+#         }
 
-        # ── Step 4: Save to database ──────────────────────────────
-        try:
-            scan_id = save_scan(
-                predicted_class        = class_name,
-                confidence_score       = confidence,
-                segmentation_performed = response["segmentation_performed"],
-                gradcam_performed      = response["gradcam_performed"],
-                file_name              = file.filename,
-                report_text            = response["report"],
-                patient_id             = patient_id,
-            )
-            response["scan_id"] = scan_id
-            print(f"[PREDICT] ✓ Saved — scan_id={scan_id}\n")
-        except Exception as e:
-            print(f"[PREDICT] ✗ DB save: {e}")
+#         # ── Step 2: Visual analysis (tumour only) ─────────────────
+#         if predicted_class != 2:
+#             print("[PREDICT] Tumour detected — running visual analysis...")
 
-        return jsonify(response), 200
+#             raw_heatmap = None
+#             try:
+#                 raw_heatmap = get_gradcam_heatmap(
+#                     model     = classification_model,
+#                     img_array = preprocessed,
+#                     class_idx = predicted_class,
+#                 )
+#             except Exception as e:
+#                 print(f"[PREDICT] ✗ Raw heatmap: {e}")
 
-    except ValueError as ve:
-        return jsonify({"error": "Invalid file", "message": str(ve)}), 400
-    except Exception:
-        print(f"[PREDICT] Unexpected error:\n{traceback.format_exc()}")
-        return jsonify({"error": "Prediction failed"}), 500
+#             try:
+#                 gradcam_b64 = generate_gradcam(
+#                     model          = classification_model,
+#                     img_array      = preprocessed,
+#                     class_idx      = predicted_class,
+#                     original_image = image_np,
+#                 )
+#                 if gradcam_b64:
+#                     response["gradcam_image"]     = gradcam_b64
+#                     response["gradcam_performed"] = True
+#                     print("[PREDICT] ✓ Grad-CAM complete")
+#             except Exception as e:
+#                 print(f"[PREDICT] ✗ Grad-CAM: {e}")
+
+#             if raw_heatmap is not None:
+#                 try:
+#                     buf = gradcam_pseudo_segmentation(
+#                         image   = image_np,
+#                         heatmap = raw_heatmap,
+#                     )
+#                     buf.seek(0)
+#                     response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
+#                     response["segmentation_performed"] = True
+#                     print("[PREDICT] ✓ Pseudo-segmentation complete")
+#                 except Exception as e:
+#                     print(f"[PREDICT] ✗ Segmentation: {e}")
+#         else:
+#             print("[PREDICT] No tumour — skipping visual analysis")
+
+#         # ── Step 3: LLM Report ────────────────────────────────────
+#         try:
+#             patient_record = get_patient_by_id(patient_id) if patient_id else None
+#             report_text    = generate_report(
+#                 class_name             = class_name,
+#                 confidence             = confidence,
+#                 segmentation_performed = response["segmentation_performed"],
+#                 gradcam_performed      = response["gradcam_performed"],
+#                 model_accuracy         = "94.92%",
+#                 patient_id             = patient_id,
+#                 patient_name           = patient_record.get("name")     if patient_record else current_user.get("full_name"),
+#                 patient_age            = patient_record.get("age")      if patient_record else None,
+#                 patient_gender         = patient_record.get("gender")   if patient_record else None,
+#                 patient_symptoms       = patient_record.get("symptoms") if patient_record else None,
+#             )
+#             response["report"] = report_text
+#             if report_text:
+#                 print(f"[PREDICT] ✓ Report generated ({len(report_text)} chars)")
+#         except Exception as e:
+#             print(f"[PREDICT] ✗ Report: {e}")
+
+#         # ── Step 4: Save to database ──────────────────────────────
+#         try:
+#             scan_id = save_scan(
+#                 predicted_class        = class_name,
+#                 confidence_score       = confidence,
+#                 segmentation_performed = response["segmentation_performed"],
+#                 gradcam_performed      = response["gradcam_performed"],
+#                 file_name              = file.filename,
+#                 report_text            = response["report"],
+#                 patient_id             = patient_id,
+#             )
+#             response["scan_id"] = scan_id
+#             print(f"[PREDICT] ✓ Saved — scan_id={scan_id}\n")
+#         except Exception as e:
+#             print(f"[PREDICT] ✗ DB save: {e}")
+
+#         return jsonify(response), 200
+
+#     except ValueError as ve:
+#         return jsonify({"error": "Invalid file", "message": str(ve)}), 400
+#     except Exception:
+#         print(f"[PREDICT] Unexpected error:\n{traceback.format_exc()}")
+#         return jsonify({"error": "Prediction failed"}), 500
 
 
 # ─── Scan History Routes ──────────────────────────────────────────────────────
@@ -617,4 +728,4 @@ def server_error(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     print(f"\n NeuroDL v2.0  |  port={port}  |  PostgreSQL  |  JWT auth\n")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    socketio.run(app, debug=True, port=5001, allow_unsafe_werkzeug=True)
