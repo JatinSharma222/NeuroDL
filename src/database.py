@@ -16,6 +16,13 @@ PostgreSQL setup:
 
 Environment variable:
   DATABASE_URL=postgresql://neurodl_user:your_password@localhost:5432/neurodl
+
+Fixes vs original:
+  • get_scans() now accepts `search` (scans by ID or patient ID)
+  • get_scans() now accepts `min_confidence` (confidence threshold filter)
+  • per_page cap raised to 1000 so CSV export works correctly
+  • INNER JOIN replaced with LEFT OUTER JOIN so scans with no patient
+    still appear in history when user_id filter is active
 """
 
 import os
@@ -31,6 +38,7 @@ from sqlalchemy import (
     DateTime,
     Text,
     ForeignKey,
+    or_,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
@@ -41,21 +49,14 @@ DATABASE_URL = os.environ.get(
     "postgresql://jatinsharma@localhost:5432/neurodl",
 )
 
-# PostgreSQL does NOT need check_same_thread
-engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
-
+engine       = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-Base = declarative_base()
+Base         = declarative_base()
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
 class User(Base):
-    """
-    Registered patient account.
-    One user -> one or more patient profiles (one per visit).
-    """
     __tablename__ = "users"
 
     id            = Column(Integer,     primary_key=True, autoincrement=True)
@@ -79,10 +80,6 @@ class User(Base):
 
 
 class Patient(Base):
-    """
-    Patient profile created before each MRI analysis session.
-    Linked to an authenticated user account.
-    """
     __tablename__ = "patients"
 
     id         = Column(Integer,     primary_key=True, autoincrement=True)
@@ -94,8 +91,8 @@ class Patient(Base):
     symptoms   = Column(Text,        nullable=True)
     created_at = Column(DateTime,    default=datetime.utcnow)
 
-    user = relationship("User",    back_populates="patients")
-    scan = relationship("Scan",    back_populates="patient", uselist=False)
+    user = relationship("User", back_populates="patients")
+    scan = relationship("Scan", back_populates="patient", uselist=False)
 
     def to_dict(self):
         return {
@@ -115,7 +112,6 @@ class Patient(Base):
 
 
 class Scan(Base):
-    """One MRI analysis record linked to a Patient."""
     __tablename__ = "scans"
 
     id                     = Column(Integer,     primary_key=True, autoincrement=True)
@@ -161,10 +157,6 @@ def init_db():
 # ─── User CRUD ────────────────────────────────────────────────────────────────
 
 def create_user(email: str, password_hash: str, full_name: str) -> "User":
-    """
-    Insert a new user. Raises ValueError if email already exists.
-    Returns the User ORM object.
-    """
     db = SessionLocal()
     try:
         existing = db.query(User).filter(User.email == email.lower().strip()).first()
@@ -188,7 +180,6 @@ def create_user(email: str, password_hash: str, full_name: str) -> "User":
 
 
 def get_user_by_email(email: str):
-    """Fetch a User by email (case-insensitive). Returns ORM object or None."""
     db = SessionLocal()
     try:
         return db.query(User).filter(User.email == email.lower().strip()).first()
@@ -197,7 +188,6 @@ def get_user_by_email(email: str):
 
 
 def get_user_by_id(user_id: int):
-    """Fetch a User by primary key. Returns ORM object or None."""
     db = SessionLocal()
     try:
         return db.query(User).filter(User.id == user_id).first()
@@ -215,7 +205,6 @@ def create_patient(
     symptoms: str = None,
     user_id:  int = None,
 ) -> int:
-    """Insert a new patient and return its ID."""
     db = SessionLocal()
     try:
         patient = Patient(
@@ -244,7 +233,6 @@ def get_patients(
     search:   str = None,
     user_id:  int = None,
 ) -> dict:
-    """Paginated patient list. Filtered by user_id to scope to logged-in user."""
     per_page = min(per_page, 100)
     db = SessionLocal()
     try:
@@ -271,7 +259,6 @@ def get_patients(
 
 
 def get_patient_by_id(patient_id: int) -> dict | None:
-    """Return a single patient with their scan, or None."""
     db = SessionLocal()
     try:
         patient = db.query(Patient).filter(Patient.id == patient_id).first()
@@ -281,7 +268,6 @@ def get_patient_by_id(patient_id: int) -> dict | None:
 
 
 def delete_patient(patient_id: int) -> bool:
-    """Delete a patient and their linked scan."""
     db = SessionLocal()
     try:
         patient = db.query(Patient).filter(Patient.id == patient_id).first()
@@ -309,7 +295,6 @@ def save_scan(
     report_text:            str  = None,
     patient_id:             int  = None,
 ) -> int:
-    """Insert a new scan record and return its ID."""
     db = SessionLocal()
     try:
         scan = Scan(
@@ -334,25 +319,65 @@ def save_scan(
 
 
 def get_scans(
-    page:       int = 1,
-    per_page:   int = 20,
-    class_name: str = None,
-    date_from:  str = None,
-    date_to:    str = None,
-    user_id:    int = None,
+    page:           int   = 1,
+    per_page:       int   = 20,
+    class_name:     str   = None,
+    date_from:      str   = None,
+    date_to:        str   = None,
+    user_id:        int   = None,
+    search:         str   = None,   # FIX 1: search by scan ID or patient ID
+    min_confidence: float = None,   # FIX 2: minimum confidence threshold
 ) -> dict:
     """
-    Paginated scan history. Scoped to user_id via patient join
-    so patients only see their own scans.
+    Paginated scan history.
+
+    Fixes vs original:
+      • per_page cap raised to 1000 (was 100) so CSV export works
+      • outerjoin instead of join so scans with patient_id=None still appear
+      • search param: matches scan ID (exact) or patient ID (exact)
+      • min_confidence param: filters confidence_score >= threshold
     """
-    per_page = min(per_page, 100)
+    # FIX 3: raise cap to 1000 so CSV export (per_page=1000) isn't silently truncated
+    per_page = min(per_page, 1000)
+
     db = SessionLocal()
     try:
-        query = db.query(Scan)
+        # FIX 4: outerjoin keeps scans with patient_id=None when user_id filter active
+        query = db.query(Scan).outerjoin(Patient, Scan.patient_id == Patient.id)
+
         if user_id:
-            query = query.join(Patient).filter(Patient.user_id == user_id)
+            query = query.filter(
+                or_(
+                    Patient.user_id == user_id,  # scans linked to this user's patients
+                    Scan.patient_id.is_(None),   # also keep unlinked scans
+                )
+            )
+
         if class_name:
             query = query.filter(Scan.predicted_class.ilike(f"%{class_name}%"))
+
+        # FIX 1a: search by scan ID
+        if search:
+            search = search.strip()
+            if search.lstrip("#").isdigit():
+                scan_id_val = int(search.lstrip("#"))
+                query = query.filter(
+                    or_(
+                        Scan.id == scan_id_val,
+                        Scan.patient_id == scan_id_val,
+                    )
+                )
+            # non-numeric search: match file_name
+            else:
+                query = query.filter(Scan.file_name.ilike(f"%{search}%"))
+
+        # FIX 2a: confidence threshold
+        if min_confidence is not None:
+            try:
+                query = query.filter(Scan.confidence_score >= float(min_confidence))
+            except (ValueError, TypeError):
+                pass
+
         if date_from:
             try:
                 query = query.filter(
@@ -360,6 +385,7 @@ def get_scans(
                 )
             except ValueError:
                 pass
+
         if date_to:
             try:
                 dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(
@@ -368,6 +394,7 @@ def get_scans(
                 query = query.filter(Scan.scan_timestamp <= dt_to)
             except ValueError:
                 pass
+
         total = query.count()
         scans = (
             query.order_by(Scan.scan_timestamp.desc())
@@ -386,7 +413,6 @@ def get_scans(
 
 
 def get_scan_by_id(scan_id: int) -> dict | None:
-    """Return a single scan by primary key."""
     db = SessionLocal()
     try:
         scan = db.query(Scan).filter(Scan.id == scan_id).first()
@@ -396,7 +422,6 @@ def get_scan_by_id(scan_id: int) -> dict | None:
 
 
 def delete_scan(scan_id: int) -> bool:
-    """Delete a scan record by primary key."""
     db = SessionLocal()
     try:
         scan = db.query(Scan).filter(Scan.id == scan_id).first()
