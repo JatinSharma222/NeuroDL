@@ -1,48 +1,24 @@
 """
-src/database.py
-───────────────
-NeuroDL v2.0 — PostgreSQL database models and helpers.
-
-Tables:
-  users    — registered patient accounts (email + bcrypt password)
-  patients — patient profile linked to a user account
-  scans    — MRI analysis results linked to a patient
-
-PostgreSQL setup:
-  brew install postgresql@15 && brew services start postgresql@15
-  psql postgres -c "CREATE DATABASE neurodl;"
-  psql postgres -c "CREATE USER neurodl_user WITH PASSWORD 'your_password';"
-  psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE neurodl TO neurodl_user;"
-
-Environment variable:
-  DATABASE_URL=postgresql://neurodl_user:your_password@localhost:5432/neurodl
-
-Fixes vs original:
-  • get_scans() now accepts `search` (scans by ID or patient ID)
-  • get_scans() now accepts `min_confidence` (confidence threshold filter)
-  • per_page cap raised to 1000 so CSV export works correctly
-  • INNER JOIN replaced with LEFT OUTER JOIN so scans with no patient
-    still appear in history when user_id filter is active
+src/database.py  —  NeuroDL v2.0
+─────────────────────────────────
+Adds vs previous version:
+  • User.role column  ('patient' | 'doctor')
+  • ClinicalNote model  — doctor notes + verdict per scan
+  • get_all_patients()  — doctor sees every patient
+  • add_clinical_note() / get_notes_for_scan()
+  • get_doctor_stats()  — aggregate numbers for doctor dashboard
 """
 
 import os
 from datetime import datetime
 
 from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    Float,
-    Boolean,
-    DateTime,
-    Text,
-    ForeignKey,
-    or_,
+    Column, Integer, String, Float, Boolean,
+    DateTime, Text, ForeignKey, or_, create_engine,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
-# ─── Database Setup ───────────────────────────────────────────────────────────
+# ─── Setup ────────────────────────────────────────────────────────────────────
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -63,6 +39,8 @@ class User(Base):
     email         = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     full_name     = Column(String(150), nullable=False)
+    # NEW: role column — 'patient' | 'doctor'
+    role          = Column(String(20),  nullable=False, default="patient")
     created_at    = Column(DateTime,    default=datetime.utcnow)
 
     patients = relationship("Patient", back_populates="user", cascade="all, delete-orphan")
@@ -72,11 +50,12 @@ class User(Base):
             "id":         self.id,
             "email":      self.email,
             "full_name":  self.full_name,
+            "role":       self.role,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
     def __repr__(self):
-        return f"<User id={self.id} email='{self.email}'>"
+        return f"<User id={self.id} email='{self.email}' role='{self.role}'>"
 
 
 class Patient(Base):
@@ -91,8 +70,8 @@ class Patient(Base):
     symptoms   = Column(Text,        nullable=True)
     created_at = Column(DateTime,    default=datetime.utcnow)
 
-    user = relationship("User", back_populates="patients")
-    scan = relationship("Scan", back_populates="patient", uselist=False)
+    user = relationship("User",    back_populates="patients")
+    scan = relationship("Scan",    back_populates="patient", uselist=False)
 
     def to_dict(self):
         return {
@@ -106,9 +85,6 @@ class Patient(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "scan":       self.scan.to_dict() if self.scan else None,
         }
-
-    def __repr__(self):
-        return f"<Patient id={self.id} name='{self.name}' age={self.age}>"
 
 
 class Scan(Base):
@@ -124,7 +100,9 @@ class Scan(Base):
     file_name              = Column(String(255), nullable=True)
     report_text            = Column(Text,        nullable=True)
 
-    patient = relationship("Patient", back_populates="scan")
+    patient = relationship("Patient",       back_populates="scan")
+    notes   = relationship("ClinicalNote",  back_populates="scan",
+                           cascade="all, delete-orphan")  # NEW
 
     def to_dict(self):
         return {
@@ -139,42 +117,69 @@ class Scan(Base):
             "report_text":            self.report_text,
         }
 
-    def __repr__(self):
-        return (
-            f"<Scan id={self.id} patient_id={self.patient_id} "
-            f"class='{self.predicted_class}' confidence={self.confidence_score:.2%}>"
-        )
+
+# NEW MODEL ────────────────────────────────────────────────────────────────────
+class ClinicalNote(Base):
+    """
+    A doctor's note + verdict on an AI prediction.
+
+    verdict:
+      'pending'  — doctor has not reviewed yet  (default)
+      'approved' — doctor confirms AI result
+      'flagged'  — doctor disagrees or wants further review
+    """
+    __tablename__ = "clinical_notes"
+
+    id         = Column(Integer,     primary_key=True, autoincrement=True)
+    scan_id    = Column(Integer,     ForeignKey("scans.id"),   nullable=False)
+    doctor_id  = Column(Integer,     ForeignKey("users.id"),   nullable=False)
+    note_text  = Column(Text,        nullable=False)
+    verdict    = Column(String(20),  nullable=False, default="pending")
+    created_at = Column(DateTime,    default=datetime.utcnow)
+
+    scan   = relationship("Scan", back_populates="notes")
+    doctor = relationship("User")
+
+    def to_dict(self):
+        return {
+            "id":          self.id,
+            "scan_id":     self.scan_id,
+            "doctor_id":   self.doctor_id,
+            "doctor_name": self.doctor.full_name if self.doctor else None,
+            "note_text":   self.note_text,
+            "verdict":     self.verdict,
+            "created_at":  self.created_at.isoformat() if self.created_at else None,
+        }
 
 
-# ─── Database Initialisation ──────────────────────────────────────────────────
+# ─── Init ─────────────────────────────────────────────────────────────────────
 
 def init_db():
-    """Create all tables. Called once at app startup."""
     Base.metadata.create_all(bind=engine)
     print("✓ PostgreSQL database initialised")
 
 
 # ─── User CRUD ────────────────────────────────────────────────────────────────
 
-def create_user(email: str, password_hash: str, full_name: str) -> "User":
+def create_user(email: str, password_hash: str, full_name: str,
+                role: str = "patient") -> "User":
     db = SessionLocal()
     try:
-        existing = db.query(User).filter(User.email == email.lower().strip()).first()
-        if existing:
+        if db.query(User).filter(User.email == email.lower().strip()).first():
             raise ValueError("Email already registered")
         user = User(
             email         = email.lower().strip(),
             password_hash = password_hash,
             full_name     = full_name.strip(),
+            role          = role,          # NEW
         )
         db.add(user)
         db.commit()
         db.refresh(user)
-        print(f"✓ User created — id={user.id}, email='{user.email}'")
+        print(f"✓ User created — id={user.id}, role='{role}', email='{user.email}'")
         return user
     except Exception:
-        db.rollback()
-        raise
+        db.rollback(); raise
     finally:
         db.close()
 
@@ -197,14 +202,7 @@ def get_user_by_id(user_id: int):
 
 # ─── Patient CRUD ─────────────────────────────────────────────────────────────
 
-def create_patient(
-    name:     str,
-    age:      int,
-    gender:   str,
-    phone:    str = None,
-    symptoms: str = None,
-    user_id:  int = None,
-) -> int:
+def create_patient(name, age, gender, phone=None, symptoms=None, user_id=None) -> int:
     db = SessionLocal()
     try:
         patient = Patient(
@@ -221,18 +219,13 @@ def create_patient(
         print(f"✓ Patient saved — id={patient.id}, name='{patient.name}'")
         return patient.id
     except Exception:
-        db.rollback()
-        raise
+        db.rollback(); raise
     finally:
         db.close()
 
 
-def get_patients(
-    page:     int = 1,
-    per_page: int = 20,
-    search:   str = None,
-    user_id:  int = None,
-) -> dict:
+def get_patients(page=1, per_page=20, search=None, user_id=None) -> dict:
+    """Paginated list scoped to a specific user (patient view)."""
     per_page = min(per_page, 100)
     db = SessionLocal()
     try:
@@ -242,27 +235,39 @@ def get_patients(
         if search:
             query = query.filter(Patient.name.ilike(f"%{search}%"))
         total    = query.count()
-        patients = (
-            query.order_by(Patient.created_at.desc())
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-            .all()
-        )
-        return {
-            "total":    total,
-            "page":     page,
-            "per_page": per_page,
-            "patients": [p.to_dict() for p in patients],
-        }
+        patients = (query.order_by(Patient.created_at.desc())
+                        .offset((page - 1) * per_page).limit(per_page).all())
+        return {"total": total, "page": page, "per_page": per_page,
+                "patients": [p.to_dict() for p in patients]}
     finally:
         db.close()
 
 
-def get_patient_by_id(patient_id: int) -> dict | None:
+def get_all_patients(page=1, per_page=20, search=None) -> dict:
+    """
+    NEW — Doctor view: returns ALL patients across all users.
+    Optionally filter by patient name.
+    """
+    per_page = min(per_page, 100)
     db = SessionLocal()
     try:
-        patient = db.query(Patient).filter(Patient.id == patient_id).first()
-        return patient.to_dict() if patient else None
+        query = db.query(Patient)
+        if search:
+            query = query.filter(Patient.name.ilike(f"%{search}%"))
+        total    = query.count()
+        patients = (query.order_by(Patient.created_at.desc())
+                        .offset((page - 1) * per_page).limit(per_page).all())
+        return {"total": total, "page": page, "per_page": per_page,
+                "patients": [p.to_dict() for p in patients]}
+    finally:
+        db.close()
+
+
+def get_patient_by_id(patient_id: int):
+    db = SessionLocal()
+    try:
+        p = db.query(Patient).filter(Patient.id == patient_id).first()
+        return p.to_dict() if p else None
     finally:
         db.close()
 
@@ -270,31 +275,22 @@ def get_patient_by_id(patient_id: int) -> dict | None:
 def delete_patient(patient_id: int) -> bool:
     db = SessionLocal()
     try:
-        patient = db.query(Patient).filter(Patient.id == patient_id).first()
-        if not patient:
-            return False
-        db.delete(patient)
-        db.commit()
+        p = db.query(Patient).filter(Patient.id == patient_id).first()
+        if not p: return False
+        db.delete(p); db.commit()
         print(f"✓ Patient id={patient_id} deleted")
         return True
     except Exception:
-        db.rollback()
-        raise
+        db.rollback(); raise
     finally:
         db.close()
 
 
 # ─── Scan CRUD ────────────────────────────────────────────────────────────────
 
-def save_scan(
-    predicted_class:        str,
-    confidence_score:       float,
-    segmentation_performed: bool = False,
-    gradcam_performed:      bool = False,
-    file_name:              str  = None,
-    report_text:            str  = None,
-    patient_id:             int  = None,
-) -> int:
+def save_scan(predicted_class, confidence_score, segmentation_performed=False,
+              gradcam_performed=False, file_name=None, report_text=None,
+              patient_id=None) -> int:
     db = SessionLocal()
     try:
         scan = Scan(
@@ -306,117 +302,70 @@ def save_scan(
             file_name              = file_name or None,
             report_text            = report_text or None,
         )
-        db.add(scan)
-        db.commit()
-        db.refresh(scan)
+        db.add(scan); db.commit(); db.refresh(scan)
         print(f"✓ Scan saved — id={scan.id}, class='{scan.predicted_class}'")
         return scan.id
     except Exception:
-        db.rollback()
-        raise
+        db.rollback(); raise
     finally:
         db.close()
 
 
-def get_scans(
-    page:           int   = 1,
-    per_page:       int   = 20,
-    class_name:     str   = None,
-    date_from:      str   = None,
-    date_to:        str   = None,
-    user_id:        int   = None,
-    search:         str   = None,   # FIX 1: search by scan ID or patient ID
-    min_confidence: float = None,   # FIX 2: minimum confidence threshold
-) -> dict:
-    """
-    Paginated scan history.
-
-    Fixes vs original:
-      • per_page cap raised to 1000 (was 100) so CSV export works
-      • outerjoin instead of join so scans with patient_id=None still appear
-      • search param: matches scan ID (exact) or patient ID (exact)
-      • min_confidence param: filters confidence_score >= threshold
-    """
-    # FIX 3: raise cap to 1000 so CSV export (per_page=1000) isn't silently truncated
+def get_scans(page=1, per_page=20, class_name=None, date_from=None,
+              date_to=None, user_id=None, search=None,
+              min_confidence=None) -> dict:
     per_page = min(per_page, 1000)
-
     db = SessionLocal()
     try:
-        # FIX 4: outerjoin keeps scans with patient_id=None when user_id filter active
         query = db.query(Scan).outerjoin(Patient, Scan.patient_id == Patient.id)
-
         if user_id:
             query = query.filter(
-                or_(
-                    Patient.user_id == user_id,  # scans linked to this user's patients
-                    Scan.patient_id.is_(None),   # also keep unlinked scans
-                )
+                or_(Patient.user_id == user_id, Scan.patient_id.is_(None))
             )
-
         if class_name:
             query = query.filter(Scan.predicted_class.ilike(f"%{class_name}%"))
-
-        # FIX 1a: search by scan ID
         if search:
-            search = search.strip()
-            if search.lstrip("#").isdigit():
-                scan_id_val = int(search.lstrip("#"))
-                query = query.filter(
-                    or_(
-                        Scan.id == scan_id_val,
-                        Scan.patient_id == scan_id_val,
-                    )
-                )
-            # non-numeric search: match file_name
+            s = search.strip()
+            if s.lstrip("#").isdigit():
+                v = int(s.lstrip("#"))
+                query = query.filter(or_(Scan.id == v, Scan.patient_id == v))
             else:
-                query = query.filter(Scan.file_name.ilike(f"%{search}%"))
-
-        # FIX 2a: confidence threshold
+                query = query.filter(Scan.file_name.ilike(f"%{s}%"))
         if min_confidence is not None:
             try:
                 query = query.filter(Scan.confidence_score >= float(min_confidence))
             except (ValueError, TypeError):
                 pass
-
         if date_from:
             try:
                 query = query.filter(
-                    Scan.scan_timestamp >= datetime.strptime(date_from, "%Y-%m-%d")
-                )
+                    Scan.scan_timestamp >= datetime.strptime(date_from, "%Y-%m-%d"))
             except ValueError:
                 pass
-
         if date_to:
             try:
                 dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59
-                )
+                    hour=23, minute=59, second=59)
                 query = query.filter(Scan.scan_timestamp <= dt_to)
             except ValueError:
                 pass
-
         total = query.count()
-        scans = (
-            query.order_by(Scan.scan_timestamp.desc())
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-            .all()
-        )
-        return {
-            "total":    total,
-            "page":     page,
-            "per_page": per_page,
-            "scans":    [s.to_dict() for s in scans],
-        }
+        scans = (query.order_by(Scan.scan_timestamp.desc())
+                     .offset((page - 1) * per_page).limit(per_page).all())
+        return {"total": total, "page": page, "per_page": per_page,
+                "scans": [s.to_dict() for s in scans]}
     finally:
         db.close()
 
 
-def get_scan_by_id(scan_id: int) -> dict | None:
+def get_scan_by_id(scan_id: int):
     db = SessionLocal()
     try:
         scan = db.query(Scan).filter(Scan.id == scan_id).first()
-        return scan.to_dict() if scan else None
+        if not scan: return None
+        data = scan.to_dict()
+        data["notes"] = [n.to_dict() for n in scan.notes]  # include notes
+        return data
     finally:
         db.close()
 
@@ -425,14 +374,80 @@ def delete_scan(scan_id: int) -> bool:
     db = SessionLocal()
     try:
         scan = db.query(Scan).filter(Scan.id == scan_id).first()
-        if not scan:
-            return False
-        db.delete(scan)
-        db.commit()
+        if not scan: return False
+        db.delete(scan); db.commit()
         print(f"✓ Scan id={scan_id} deleted")
         return True
     except Exception:
-        db.rollback()
-        raise
+        db.rollback(); raise
+    finally:
+        db.close()
+
+
+# ─── Clinical Note CRUD (NEW) ─────────────────────────────────────────────────
+
+def add_clinical_note(scan_id: int, doctor_id: int,
+                      note_text: str, verdict: str = "pending") -> dict:
+    """
+    Insert a clinical note. verdict must be 'pending' | 'approved' | 'flagged'.
+    Returns the new note as a dict.
+    """
+    if verdict not in ("pending", "approved", "flagged"):
+        raise ValueError(f"Invalid verdict '{verdict}'")
+
+    db = SessionLocal()
+    try:
+        note = ClinicalNote(
+            scan_id   = scan_id,
+            doctor_id = doctor_id,
+            note_text = note_text.strip(),
+            verdict   = verdict,
+        )
+        db.add(note); db.commit(); db.refresh(note)
+        print(f"✓ Note added — scan_id={scan_id}, verdict='{verdict}'")
+        return note.to_dict()
+    except Exception:
+        db.rollback(); raise
+    finally:
+        db.close()
+
+
+def get_notes_for_scan(scan_id: int) -> list:
+    """Return all clinical notes for a scan, newest first."""
+    db = SessionLocal()
+    try:
+        notes = (db.query(ClinicalNote)
+                   .filter(ClinicalNote.scan_id == scan_id)
+                   .order_by(ClinicalNote.created_at.desc())
+                   .all())
+        return [n.to_dict() for n in notes]
+    finally:
+        db.close()
+
+
+def get_doctor_stats() -> dict:
+    """
+    NEW — Aggregate numbers for the doctor dashboard header.
+    Returns total patients, total scans, pending/approved/flagged counts.
+    """
+    db = SessionLocal()
+    try:
+        total_patients = db.query(Patient).count()
+        total_scans    = db.query(Scan).count()
+        pending        = db.query(ClinicalNote).filter(
+                            ClinicalNote.verdict == "pending").count()
+        approved       = db.query(ClinicalNote).filter(
+                            ClinicalNote.verdict == "approved").count()
+        flagged        = db.query(ClinicalNote).filter(
+                            ClinicalNote.verdict == "flagged").count()
+        return {
+            "total_patients": total_patients,
+            "total_scans":    total_scans,
+            "notes": {
+                "pending":  pending,
+                "approved": approved,
+                "flagged":  flagged,
+            },
+        }
     finally:
         db.close()

@@ -1,15 +1,9 @@
 """
-src/auth.py
-───────────
-NeuroDL v2.0 — Authentication helpers.
-
-Handles:
-  - Password hashing and verification (bcrypt)
-  - JWT token generation and decoding
-  - Flask route decorator @require_auth
-
-Environment variables:
-  SECRET_KEY : JWT signing secret (required in production)
+src/auth.py  —  NeuroDL v2.0
+──────────────────────────────
+Change vs previous version:
+  • create_token() now accepts and encodes role
+  • require_doctor() decorator — blocks non-doctors with 403
 """
 
 import os
@@ -21,50 +15,40 @@ import bcrypt
 import jwt
 from flask import jsonify, request
 
-# ─── Configuration ────────────────────────────────────────────────────────────
-
 SECRET_KEY      = os.environ.get("SECRET_KEY", "neurodl-dev-secret-change-in-production")
 JWT_ALGORITHM   = "HS256"
 JWT_EXPIRES_HRS = 24
 
 
-# ─── Password Helpers ─────────────────────────────────────────────────────────
+# ─── Password ─────────────────────────────────────────────────────────────────
 
 def hash_password(plain: str) -> str:
-    salt   = bcrypt.gensalt(rounds=12)
-    hashed = bcrypt.hashpw(plain.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return bcrypt.checkpw(
-            plain.encode("utf-8"),
-            hashed.encode("utf-8"),
-        )
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
         return False
 
 
-# ─── JWT Helpers ──────────────────────────────────────────────────────────────
+# ─── JWT ──────────────────────────────────────────────────────────────────────
 
-def create_token(user_id: int, email: str, full_name: str) -> str:
-    """
-    Create a signed JWT.
-    sub is stored as a STRING — PyJWT requires sub to be a string.
-    Cast back to int with int(current_user["sub"]) when needed.
-    """
+def create_token(user_id: int, email: str, full_name: str,
+                 role: str = "patient") -> str:          # NEW: role param
     payload = {
-        "sub":       str(user_id),   # ← must be string for PyJWT
+        "sub":       str(user_id),
         "email":     email,
         "full_name": full_name,
+        "role":      role,                               # NEW: stored in token
         "iat":       datetime.utcnow(),
         "exp":       datetime.utcnow() + timedelta(hours=JWT_EXPIRES_HRS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
-def decode_token(token: str) -> dict | None:
+def decode_token(token: str):
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
@@ -78,38 +62,48 @@ def decode_token(token: str) -> dict | None:
         return None
 
 
-def get_token_from_request() -> str | None:
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+def get_token_from_request():
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
         return None
-    return auth_header[len("Bearer "):]
+    return auth[len("Bearer "):]
 
 
-# ─── Route Decorator ──────────────────────────────────────────────────────────
+# ─── Decorators ───────────────────────────────────────────────────────────────
 
 def require_auth(f):
-    """
-    Flask route decorator — blocks unauthenticated requests.
-    Injects decoded JWT payload as current_user into the route.
-
-    Note: current_user["sub"] is a STRING — cast to int where needed:
-        user_id = int(current_user["sub"])
-    """
+    """Block unauthenticated requests. Injects current_user into route."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = get_token_from_request()
+        token   = get_token_from_request()
         if not token:
-            return jsonify({
-                "error":   "Authentication required",
-                "message": "Please log in to access this resource",
-            }), 401
-
+            return jsonify({"error": "Authentication required",
+                            "message": "Please log in"}), 401
         payload = decode_token(token)
         if not payload:
-            return jsonify({
-                "error":   "Invalid or expired token",
-                "message": "Please log in again",
-            }), 401
-
+            return jsonify({"error": "Invalid or expired token",
+                            "message": "Please log in again"}), 401
         return f(*args, current_user=payload, **kwargs)
+    return decorated
+
+
+def require_doctor(f):
+    """
+    NEW — Block non-doctor users with 403.
+    Must be stacked AFTER @require_auth so current_user is available.
+
+    Usage:
+        @app.route("/doctor/patients")
+        @require_auth
+        @require_doctor
+        def doctor_patients(current_user): ...
+    """
+    @wraps(f)
+    def decorated(*args, current_user, **kwargs):
+        if current_user.get("role") != "doctor":
+            return jsonify({
+                "error":   "Doctor access required",
+                "message": "This endpoint is restricted to doctor accounts",
+            }), 403
+        return f(*args, current_user=current_user, **kwargs)
     return decorated
