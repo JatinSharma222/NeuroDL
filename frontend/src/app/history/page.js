@@ -4,6 +4,7 @@ import Link from "next/link";
 import HistoryTable from "../components/HistoryTable";
 import AnalyticsDashboard from "../components/AnalyticsDashboard";
 import ProtectedRoute from "../components/ProtectedRoute";
+import PatientTimeline from "../../components/PatientTimeline";
 
 /**
  * history/page.js
@@ -105,6 +106,7 @@ const HistoryPage = () => {
       <section className="section-sm">
         <div className="container">
           <div className="max-w-6xl mx-auto">
+            <PatientTimeline />
             <HistoryTable />
           </div>
         </div>
