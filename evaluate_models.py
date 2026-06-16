@@ -1,5 +1,12 @@
 import json
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray):  return obj.tolist()
+        return super().default(obj)
 import os
+
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -192,7 +199,7 @@ performance_json = {
 
 json_path = "training_outputs/evaluation/model_performance.json"
 with open(json_path, "w") as f:
-    json.dump(performance_json, f, indent=2)
+    json.dump(performance_json, f, indent=2, cls=NumpyEncoder)
 
 print(f"✓ Model performance JSON saved: {json_path}")
 
