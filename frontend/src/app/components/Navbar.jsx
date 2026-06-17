@@ -19,7 +19,8 @@ export default function Navbar() {
 
   const isDoctor   = user?.role === "doctor";
   const isHistory  = pathname === "/history";
-  const isDoctor_p = pathname === "/doctor";
+  const isDoctor_p  = pathname === "/doctor";
+  const isAnalytics = pathname === "/model-analytics";
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 10);
@@ -90,6 +91,18 @@ export default function Navbar() {
                     {isHistory && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--color-primary)", display: "inline-block" }} />}
                   </Link>
                 )}
+
+                {/* Model Analytics — visible to all roles */}
+                <Link href="/model-analytics"
+                  className="flex items-center gap-1.5 text-sm font-semibold transition-colors"
+                  style={{ color: isAnalytics ? "#7c3aed" : "var(--color-text-secondary)" }}>
+                  <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  Model Analytics
+                  {isAnalytics && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#7c3aed", display: "inline-block" }} />}
+                </Link>
 
                 {/* Analyse CTA — both roles can analyse */}
                 <a href="/#analyze" className="btn btn-primary">Analyse Scan</a>
@@ -173,6 +186,15 @@ export default function Navbar() {
                     </Link>
                 }
 
+                <Link href="/model-analytics"
+                  className="flex items-center gap-2 py-2 text-sm font-semibold"
+                  style={{ color: isAnalytics ? "#7c3aed" : "var(--color-text-secondary)" }}>
+                  <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  Model Analytics
+                </Link>
                 <a href="/#analyze" className="btn btn-primary" style={{ justifyContent: "center" }}>Analyse Scan</a>
                 <button onClick={logout} className="btn btn-ghost" style={{ justifyContent: "center", color: "var(--color-text-light)" }}>
                   <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
