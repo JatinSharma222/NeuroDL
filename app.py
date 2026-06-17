@@ -5,9 +5,10 @@ NeuroDL v2.0 — Flask API with JWT authentication + Flask-SocketIO.
 
 Public endpoints:
   GET  /                     — health check
-  POST /auth/register        — create account
+  POST /auth/register        — create account (patient or doctor)
   POST /auth/login           — get JWT token
-  GET  /auth/me              — get current user (requires auth)
+  GET  /auth/me              — get current user
+  GET  /model-performance    — pre-computed evaluation metrics (public)
 
 Protected endpoints (require Authorization: Bearer <token>):
   POST   /patients           — register patient profile
@@ -15,16 +16,25 @@ Protected endpoints (require Authorization: Bearer <token>):
   GET    /patients/<id>      — single patient + scan
   DELETE /patients/<id>      — delete patient
   POST   /predict            — MRI analysis (emits socket progress)
-  GET    /history            — own scan history (search, min_confidence, dates)
+  POST   /compare-gradcam    — frozen vs fine-tuned Grad-CAM comparison
+  GET    /history            — own scan history
   GET    /history/<id>       — single scan
   DELETE /history/<id>       — delete scan
   GET    /stats              — analytics for current user
   POST   /auth/refresh       — refresh JWT token
+
+Doctor-only endpoints (require role=doctor in JWT):
+  GET  /doctor/stats                    — aggregate dashboard numbers
+  GET  /doctor/patients                 — all patients across all users
+  GET  /doctor/patients/<id>            — patient + scan + notes
+  GET  /doctor/scans/<id>/notes         — all notes for a scan
+  POST /doctor/scans/<id>/notes         — add clinical note + verdict
 """
 
 import base64
+import json as _json       # renamed to avoid conflict with flask.json
 import os
-import time                        # FIX 4: moved to top-level
+import time
 import traceback
 from io import BytesIO
 
@@ -34,16 +44,23 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
-from src.auth import create_token, hash_password, require_auth, verify_password
+from src.auth import (
+    create_token, hash_password, require_auth,
+    require_doctor, verify_password,            # require_doctor added
+)
 from src.config import RESNET50_MODEL_PATH
 from src.database import (
     SessionLocal,
     Patient,
     Scan,
+    add_clinical_note,       # new
     create_patient,
     create_user,
     delete_patient,
     delete_scan,
+    get_all_patients,        # new
+    get_doctor_stats,        # new
+    get_notes_for_scan,      # new
     get_patient_by_id,
     get_patients,
     get_scan_by_id,
@@ -80,7 +97,10 @@ CLASS_NAMES = {
     3: "Pituitary Tumor",
 }
 
+DOCTOR_INVITE_CODE = os.environ.get("DOCTOR_INVITE_CODE", "NEURODL-DOCTOR-2026")
+
 classification_model = None
+frozen_model         = None     # pre-fine-tuning checkpoint for Grad-CAM comparison
 app_initialized      = False
 
 
@@ -100,15 +120,26 @@ def handle_options():
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 def load_models():
-    global classification_model
+    global classification_model, frozen_model
     print("\n" + "=" * 60)
     print("NEURODL v2.0 — STARTUP")
     print("=" * 60)
     print("\n[DB] Initialising PostgreSQL database...")
     init_db()
+
     print(f"\n[Model] Loading classification model...")
     classification_model = load_local_model(RESNET50_MODEL_PATH)
     print(f"✓ Classification model loaded  ({RESNET50_MODEL_PATH})")
+
+    # Load frozen checkpoint for Grad-CAM comparison (optional)
+    frozen_ckpt = "models/checkpoints/ResNet50V2_best.keras"
+    if os.path.exists(frozen_ckpt):
+        frozen_model = load_local_model(frozen_ckpt)
+        print(f"✓ Frozen checkpoint loaded  ({frozen_ckpt})")
+    else:
+        frozen_model = None
+        print(f"⚠ Frozen checkpoint not found at {frozen_ckpt} — compare-gradcam will use single model")
+
     print("\n" + "=" * 60)
     print("ALL SYSTEMS READY")
     print("=" * 60 + "\n")
@@ -123,31 +154,14 @@ def initialize():
 
 
 # ─── Socket progress helper ───────────────────────────────────────────────────
-# FIX 1: was indented with a leading space, causing SyntaxError.
-# Must be at module level, NOT inside load_models().
 
 def emit_progress(socket_id: str, step: str, status: str,
                   message: str = "", duration: float = None):
-    """
-    Emit a pipeline progress event to a specific socket client.
-
-    Args:
-        socket_id : socket.id sent by the frontend in form data
-        step      : preprocess | resnet | gradcam | segmentation | report
-        status    : 'running' | 'done' | 'error'
-        message   : optional detail string
-        duration  : seconds taken (for 'done' events)
-    """
     if not socket_id:
         return
     socketio.emit(
         "progress",
-        {
-            "step":     step,
-            "status":   status,
-            "message":  message,
-            "duration": duration,
-        },
+        {"step": step, "status": status, "message": message, "duration": duration},
         room=socket_id,
         namespace="/",
     )
@@ -174,22 +188,29 @@ def register():
     if not data:
         return jsonify({"error": "JSON body required"}), 400
 
-    full_name = data.get("full_name", "").strip()
-    email     = data.get("email",     "").strip()
-    password  = data.get("password",  "")
+    full_name   = data.get("full_name",   "").strip()
+    email       = data.get("email",       "").strip()
+    password    = data.get("password",    "")
+    role        = data.get("role",        "patient")
+    doctor_code = data.get("doctor_code", "").strip()
 
     errors = []
-    if not full_name:                        errors.append("Full name is required")
-    if not email or "@" not in email:        errors.append("Valid email is required")
-    if not password or len(password) < 8:   errors.append("Password must be at least 8 characters")
+    if not full_name:                       errors.append("Full name is required")
+    if not email or "@" not in email:       errors.append("Valid email is required")
+    if not password or len(password) < 8:  errors.append("Password must be at least 8 characters")
+    if role not in ("patient", "doctor"):  errors.append("Invalid role")
+    if role == "doctor" and doctor_code != DOCTOR_INVITE_CODE:
+        errors.append("Invalid doctor invite code")
     if errors:
         return jsonify({"error": "Validation failed", "details": errors}), 400
 
     try:
         hashed = hash_password(password)
-        user   = create_user(email=email, password_hash=hashed, full_name=full_name)
-        token  = create_token(user_id=user.id, email=user.email, full_name=user.full_name)
-        print(f"[AUTH] Registered — {email}")
+        user   = create_user(email=email, password_hash=hashed,
+                             full_name=full_name, role=role)
+        token  = create_token(user_id=user.id, email=user.email,
+                              full_name=user.full_name, role=user.role)
+        print(f"[AUTH] Registered — {email} ({role})")
         return jsonify({"token": token, "user": user.to_dict()}), 201
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 409
@@ -215,8 +236,9 @@ def login():
         if not user or not verify_password(password, user.password_hash):
             return jsonify({"error": "Invalid email or password"}), 401
 
-        token = create_token(user_id=user.id, email=user.email, full_name=user.full_name)
-        print(f"[AUTH] Login — {email}")
+        token = create_token(user_id=user.id, email=user.email,
+                             full_name=user.full_name, role=user.role)
+        print(f"[AUTH] Login — {email} ({user.role})")
         return jsonify({"token": token, "user": user.to_dict()}), 200
     except Exception:
         print(f"[AUTH] Login error: {traceback.format_exc()}")
@@ -230,6 +252,7 @@ def me(current_user):
         "id":        int(current_user["sub"]),
         "email":     current_user["email"],
         "full_name": current_user["full_name"],
+        "role":      current_user.get("role", "patient"),
     }), 200
 
 
@@ -240,7 +263,7 @@ def refresh_token(current_user):
         user = get_user_by_id(int(current_user["sub"]))
         if not user:
             return jsonify({"error": "User not found"}), 404
-        new_token = create_token(user.id, user.email, user.full_name)
+        new_token = create_token(user.id, user.email, user.full_name, user.role)
         return jsonify({"token": new_token, "user": user.to_dict()}), 200
     except Exception:
         print(f"[Auth] Refresh error:\n{traceback.format_exc()}")
@@ -261,7 +284,7 @@ def register_patient(current_user):
     gender = data.get("gender", "").strip()
 
     errors = []
-    if not name:   errors.append("name is required")
+    if not name:    errors.append("name is required")
     if age is None: errors.append("age is required")
     elif not str(age).isdigit() or not (0 < int(age) < 130):
         errors.append("age must be between 1 and 129")
@@ -271,15 +294,13 @@ def register_patient(current_user):
 
     try:
         patient_id = create_patient(
-            name     = name,
-            age      = int(age),
-            gender   = gender,
-            phone    = data.get("phone"),
-            symptoms = data.get("symptoms"),
-            user_id  = int(current_user["sub"]),
+            name=name, age=int(age), gender=gender,
+            phone=data.get("phone"), symptoms=data.get("symptoms"),
+            user_id=int(current_user["sub"]),
         )
         print(f"[PATIENT] Registered — id={patient_id}, user={current_user['email']}")
-        return jsonify({"patient_id": patient_id, "message": f"Patient '{name}' registered successfully"}), 201
+        return jsonify({"patient_id": patient_id,
+                        "message": f"Patient '{name}' registered successfully"}), 201
     except Exception:
         print(f"[PATIENT] Error: {traceback.format_exc()}")
         return jsonify({"error": "Failed to register patient"}), 500
@@ -332,14 +353,11 @@ def patient_delete(current_user, patient_id):
 
 
 # ─── Predict Route ────────────────────────────────────────────────────────────
-# FIX 2: restored the real working predict logic (was fully commented out and
-#         replaced with broken placeholders like resnet_model.predict(...) ).
-#         Socket emit calls added at each pipeline stage.
 
 @app.route("/predict", methods=["POST"])
 @require_auth
 def predict(current_user):
-    socket_id = request.form.get("socket_id")   # from APIRequest.jsx
+    socket_id = request.form.get("socket_id")
 
     if "image" not in request.files:
         return jsonify({"error": "No image provided"}), 400
@@ -359,72 +377,63 @@ def predict(current_user):
     print(f"{'='*55}")
 
     try:
-        # ── Stage 1: Preprocess ───────────────────────────────────
+        # Stage 1: Preprocess
         emit_progress(socket_id, "preprocess", "running")
-        t0 = time.time()
-
+        t0           = time.time()
         image_np     = load_image(file)
         preprocessed = preprocess_classification(image_np)
+        emit_progress(socket_id, "preprocess", "done", duration=round(time.time()-t0, 2))
 
-        emit_progress(socket_id, "preprocess", "done", duration=round(time.time() - t0, 2))
-
-        # ── Stage 2: ResNet50V2 classification ────────────────────
+        # Stage 2: ResNet50V2
         emit_progress(socket_id, "resnet", "running")
-        t0 = time.time()
-
+        t0              = time.time()
         predictions     = classification_model.predict(preprocessed, verbose=0)
         predicted_class = int(np.argmax(predictions[0]))
         confidence      = float(predictions[0][predicted_class])
         class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
-
-        emit_progress(socket_id, "resnet", "done", duration=round(time.time() - t0, 2))
+        emit_progress(socket_id, "resnet", "done", duration=round(time.time()-t0, 2))
 
         class_probabilities = {
             CLASS_NAMES[i]: float(predictions[0][i])
             for i in range(len(predictions[0]))
         }
-
         print(f"[PREDICT] Result: {class_name}  ({confidence:.2%})")
 
         response = {
-            "final_class":             predicted_class,
-            "class_name":              class_name,
-            "confidence":              f"{confidence:.2%}",
-            "model_used":              "ResNet50V2",
-            "model_accuracy":          "94.92%",
-            "segmentation_performed":  False,
-            "gradcam_performed":       False,
-            "segment_image":           None,
-            "gradcam_image":           None,
-            "report":                  None,
-            "scan_id":                 None,
-            "patient_id":              patient_id,
-            "class_probabilities":     class_probabilities,
+            "final_class":            predicted_class,
+            "class_name":             class_name,
+            "confidence":             f"{confidence:.2%}",
+            "model_used":             "ResNet50V2",
+            "model_accuracy":         "94.92%",
+            "segmentation_performed": False,
+            "gradcam_performed":      False,
+            "segment_image":          None,
+            "gradcam_image":          None,
+            "report":                 None,
+            "scan_id":                None,
+            "patient_id":             patient_id,
+            "class_probabilities":    class_probabilities,
         }
 
-        # ── Stage 3: Grad-CAM + Segmentation (tumour only) ────────
+        # Stage 3: Grad-CAM + Segmentation (tumour only)
         if predicted_class != 2:
             print("[PREDICT] Tumour detected — running visual analysis...")
             raw_heatmap = None
 
-            # Grad-CAM
             emit_progress(socket_id, "gradcam", "running")
             t0 = time.time()
             try:
                 raw_heatmap = get_gradcam_heatmap(
-                    model     = classification_model,
-                    img_array = preprocessed,
-                    class_idx = predicted_class,
+                    model=classification_model, img_array=preprocessed,
+                    class_idx=predicted_class,
                 )
             except Exception as e:
                 print(f"[PREDICT] ✗ Raw heatmap: {e}")
 
             try:
                 gradcam_b64 = generate_gradcam(
-                    model          = classification_model,
-                    img_array      = preprocessed,
-                    class_idx      = predicted_class,
-                    original_image = image_np,
+                    model=classification_model, img_array=preprocessed,
+                    class_idx=predicted_class, original_image=image_np,
                 )
                 if gradcam_b64:
                     response["gradcam_image"]     = gradcam_b64
@@ -432,10 +441,8 @@ def predict(current_user):
                     print("[PREDICT] ✓ Grad-CAM complete")
             except Exception as e:
                 print(f"[PREDICT] ✗ Grad-CAM: {e}")
+            emit_progress(socket_id, "gradcam", "done", duration=round(time.time()-t0, 2))
 
-            emit_progress(socket_id, "gradcam", "done", duration=round(time.time() - t0, 2))
-
-            # Segmentation
             emit_progress(socket_id, "segmentation", "running")
             t0 = time.time()
             if raw_heatmap is not None:
@@ -447,12 +454,11 @@ def predict(current_user):
                     print("[PREDICT] ✓ Pseudo-segmentation complete")
                 except Exception as e:
                     print(f"[PREDICT] ✗ Segmentation: {e}")
-            emit_progress(socket_id, "segmentation", "done", duration=round(time.time() - t0, 2))
-
+            emit_progress(socket_id, "segmentation", "done", duration=round(time.time()-t0, 2))
         else:
             print("[PREDICT] No tumour — skipping visual analysis")
 
-        # ── Stage 4: LLM Report ───────────────────────────────────
+        # Stage 4: LLM Report
         emit_progress(socket_id, "report", "running")
         t0 = time.time()
         try:
@@ -474,9 +480,9 @@ def predict(current_user):
                 print(f"[PREDICT] ✓ Report generated ({len(report_text)} chars)")
         except Exception as e:
             print(f"[PREDICT] ✗ Report: {e}")
-        emit_progress(socket_id, "report", "done", duration=round(time.time() - t0, 2))
+        emit_progress(socket_id, "report", "done", duration=round(time.time()-t0, 2))
 
-        # ── Stage 5: Save to database ─────────────────────────────
+        # Stage 5: Save to database
         try:
             scan_id = save_scan(
                 predicted_class        = class_name,
@@ -503,8 +509,63 @@ def predict(current_user):
         return jsonify({"error": "Prediction failed"}), 500
 
 
+# ─── Grad-CAM Comparison Route ────────────────────────────────────────────────
+
+@app.route("/compare-gradcam", methods=["POST"])
+@require_auth
+def compare_gradcam(current_user):
+    """Frozen vs fine-tuned Grad-CAM for the same image."""
+    if "image" not in request.files:
+        return jsonify({"error": "No image provided"}), 400
+
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+
+    try:
+        image_np     = load_image(file)
+        preprocessed = preprocess_classification(image_np)
+
+        predictions     = classification_model.predict(preprocessed, verbose=0)
+        predicted_class = int(np.argmax(predictions[0]))
+        confidence      = float(predictions[0][predicted_class])
+        class_name      = CLASS_NAMES.get(predicted_class, "Unknown")
+        print(f"[COMPARE] Prediction: {class_name} ({confidence:.2%})")
+
+        finetuned_b64 = generate_gradcam(
+            model=classification_model, img_array=preprocessed,
+            class_idx=predicted_class, original_image=image_np,
+        )
+        print("[COMPARE] ✓ Fine-tuned Grad-CAM generated")
+
+        frozen_b64       = None
+        frozen_available = frozen_model is not None
+        if frozen_model is not None:
+            try:
+                frozen_b64 = generate_gradcam(
+                    model=frozen_model, img_array=preprocessed,
+                    class_idx=predicted_class, original_image=image_np,
+                )
+                print("[COMPARE] ✓ Frozen Grad-CAM generated")
+            except Exception as e:
+                print(f"[COMPARE] ✗ Frozen Grad-CAM failed: {e}")
+        else:
+            print("[COMPARE] ⚠ Frozen model not loaded")
+
+        return jsonify({
+            "frozen":           frozen_b64,
+            "finetuned":        finetuned_b64,
+            "class_name":       class_name,
+            "confidence":       f"{confidence:.2%}",
+            "frozen_available": frozen_available,
+        }), 200
+
+    except Exception:
+        print(f"[COMPARE] Error:\n{traceback.format_exc()}")
+        return jsonify({"error": "Comparison failed"}), 500
+
+
 # ─── Scan History Routes ──────────────────────────────────────────────────────
-# FIX 3: /history now forwards search and min_confidence to get_scans()
 
 @app.route("/history", methods=["GET"])
 @require_auth
@@ -512,7 +573,6 @@ def history(current_user):
     try:
         raw_min_conf   = request.args.get("min_confidence")
         min_confidence = float(raw_min_conf) if raw_min_conf else None
-
         result = get_scans(
             page           = max(1, int(request.args.get("page",     1))),
             per_page       = max(1, int(request.args.get("per_page", 20))),
@@ -520,8 +580,8 @@ def history(current_user):
             date_from      = request.args.get("date_from"),
             date_to        = request.args.get("date_to"),
             user_id        = int(current_user["sub"]),
-            search         = request.args.get("search"),       # ← wired up
-            min_confidence = min_confidence,                    # ← wired up
+            search         = request.args.get("search"),
+            min_confidence = min_confidence,
         )
         return jsonify(result), 200
     except ValueError:
@@ -569,9 +629,7 @@ def stats(current_user):
         scans = (
             db.query(Scan)
             .join(Patient, Scan.patient_id == Patient.id, isouter=True)
-            .filter(
-                (Patient.user_id == user_id) | (Scan.patient_id == None)
-            )
+            .filter((Patient.user_id == user_id) | (Scan.patient_id == None))
             .all()
         )
         db.close()
@@ -581,7 +639,8 @@ def stats(current_user):
             return jsonify({
                 "total": 0, "class_distribution": {},
                 "avg_confidence": {}, "overall_avg_confidence": 0,
-                "scans_per_day": [], "feature_usage": {"segmentation": 0, "gradcam": 0, "report": 0},
+                "scans_per_day": [],
+                "feature_usage": {"segmentation": 0, "gradcam": 0, "report": 0},
             }), 200
 
         class_counts = defaultdict(int)
@@ -591,8 +650,7 @@ def stats(current_user):
             class_conf[s.predicted_class].append(s.confidence_score)
 
         avg_confidence = {
-            cls: round(sum(vals) / len(vals), 4)
-            for cls, vals in class_conf.items()
+            cls: round(sum(v)/len(v), 4) for cls, v in class_conf.items()
         }
 
         today   = datetime.utcnow().date()
@@ -628,6 +686,105 @@ def stats(current_user):
     except Exception:
         print("[STATS] Error: " + traceback.format_exc())
         return jsonify({"error": "Failed to fetch stats"}), 500
+
+
+# ─── Model Performance Route (public) ────────────────────────────────────────
+
+@app.route("/model-performance", methods=["GET"])
+def model_performance():
+    """Serve pre-computed evaluation metrics. Run evaluate_models.py first."""
+    json_path = "training_outputs/evaluation/model_performance.json"
+    if not os.path.exists(json_path):
+        return jsonify({
+            "error":     "Model performance data not yet computed",
+            "message":   "Run evaluate_models.py to generate this data",
+            "available": False,
+        }), 404
+    try:
+        with open(json_path, "r") as f:
+            data = _json.load(f)
+        data["available"] = True
+        return jsonify(data), 200
+    except Exception:
+        print(f"[PERF] Error reading JSON:\n{traceback.format_exc()}")
+        return jsonify({"error": "Failed to read performance data"}), 500
+
+
+# ─── Doctor Routes ────────────────────────────────────────────────────────────
+
+@app.route("/doctor/stats", methods=["GET"])
+@require_auth
+@require_doctor
+def doctor_stats(current_user):
+    try:
+        return jsonify(get_doctor_stats()), 200
+    except Exception:
+        return jsonify({"error": "Failed to fetch stats"}), 500
+
+
+@app.route("/doctor/patients", methods=["GET"])
+@require_auth
+@require_doctor
+def doctor_patients(current_user):
+    try:
+        result = get_all_patients(
+            page     = max(1, int(request.args.get("page",     1))),
+            per_page = max(1, min(int(request.args.get("per_page", 20)), 100)),
+            search   = request.args.get("search"),
+        )
+        return jsonify(result), 200
+    except Exception:
+        return jsonify({"error": "Failed to fetch patients"}), 500
+
+
+@app.route("/doctor/patients/<int:patient_id>", methods=["GET"])
+@require_auth
+@require_doctor
+def doctor_patient_detail(current_user, patient_id):
+    try:
+        patient = get_patient_by_id(patient_id)
+        if not patient:
+            return jsonify({"error": f"Patient {patient_id} not found"}), 404
+        if patient.get("scan") and patient["scan"].get("id"):
+            patient["scan"]["notes"] = get_notes_for_scan(patient["scan"]["id"])
+        return jsonify(patient), 200
+    except Exception:
+        return jsonify({"error": "Failed to fetch patient"}), 500
+
+
+@app.route("/doctor/scans/<int:scan_id>/notes", methods=["GET"])
+@require_auth
+@require_doctor
+def doctor_get_notes(current_user, scan_id):
+    try:
+        return jsonify({"notes": get_notes_for_scan(scan_id)}), 200
+    except Exception:
+        return jsonify({"error": "Failed to fetch notes"}), 500
+
+
+@app.route("/doctor/scans/<int:scan_id>/notes", methods=["POST"])
+@require_auth
+@require_doctor
+def doctor_add_note(current_user, scan_id):
+    data = request.get_json(silent=True)
+    if not data or not data.get("note_text", "").strip():
+        return jsonify({"error": "note_text is required"}), 400
+
+    verdict = data.get("verdict", "pending")
+    if verdict not in ("pending", "approved", "flagged"):
+        return jsonify({"error": "verdict must be pending | approved | flagged"}), 400
+
+    try:
+        note = add_clinical_note(
+            scan_id   = scan_id,
+            doctor_id = int(current_user["sub"]),
+            note_text = data["note_text"],
+            verdict   = verdict,
+        )
+        return jsonify({"note": note, "message": "Note added successfully"}), 201
+    except Exception:
+        print(f"[DOCTOR] Note error: {traceback.format_exc()}")
+        return jsonify({"error": "Failed to add note"}), 500
 
 
 # ─── Error Handlers ───────────────────────────────────────────────────────────
