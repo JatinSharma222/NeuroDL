@@ -1,5 +1,5 @@
 """
-src/database.py  —  NeuroDL v2.0
+src/database.py  —  NeuroDL v2.1
 ─────────────────────────────────
 Adds vs previous version:
   • User.role column  ('patient' | 'doctor')
@@ -7,6 +7,20 @@ Adds vs previous version:
   • get_all_patients()  — doctor sees every patient
   • add_clinical_note() / get_notes_for_scan()
   • get_doctor_stats()  — aggregate numbers for doctor dashboard
+
+v2.1 — structural fix:
+  • Patient is now a 1-to-1 PROFILE on a User (age/gender/phone only).
+    `name` is NEVER stored here — it's always read live from
+    users.full_name, so it can't drift out of sync and never has to
+    be retyped.
+  • Patient → Scan is now one-to-many (was incorrectly uselist=False,
+    which is why a new "patient" row got created on every form
+    submit instead of reusing the account).
+  • `symptoms` moved from Patient (profile) to Scan (per-visit reason
+    for that specific scan).
+  • get_or_create_patient_profile() — upserts the current user's own
+    profile. There is no longer any way to create a profile for
+    someone else's account from the API.
 """
 
 import os
@@ -43,7 +57,10 @@ class User(Base):
     role          = Column(String(20),  nullable=False, default="patient")
     created_at    = Column(DateTime,    default=datetime.utcnow)
 
-    patients = relationship("Patient", back_populates="user", cascade="all, delete-orphan")
+    patient = relationship(
+        "Patient", back_populates="user",
+        uselist=False, cascade="all, delete-orphan",
+    )
 
     def to_dict(self):
         return {
@@ -59,32 +76,52 @@ class User(Base):
 
 
 class Patient(Base):
+    """
+    A patient PROFILE — one per user account (1-to-1 with User).
+
+    Deliberately does NOT store `name`. The name shown anywhere in the
+    app is always read live from `users.full_name` via the `user`
+    relationship, so it can never go stale and never needs retyping.
+
+    `symptoms` also lives on Scan now, not here — the reason for a
+    scan changes visit to visit; age/gender/phone are profile-level
+    and persist across visits.
+    """
     __tablename__ = "patients"
 
-    id         = Column(Integer,     primary_key=True, autoincrement=True)
-    user_id    = Column(Integer,     ForeignKey("users.id"), nullable=True)
-    name       = Column(String(150), nullable=False)
-    age        = Column(Integer,     nullable=False)
-    gender     = Column(String(20),  nullable=False)
-    phone      = Column(String(20),  nullable=True)
-    symptoms   = Column(Text,        nullable=True)
-    created_at = Column(DateTime,    default=datetime.utcnow)
+    id         = Column(Integer,  primary_key=True, autoincrement=True)
+    user_id    = Column(Integer,  ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    age        = Column(Integer,  nullable=True)
+    gender     = Column(String(20), nullable=True)
+    phone      = Column(String(20), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    user = relationship("User",    back_populates="patients")
-    scan = relationship("Scan",    back_populates="patient", uselist=False)
+    user  = relationship("User", back_populates="patient")
+    scans = relationship(
+        "Scan", back_populates="patient",
+        order_by="desc(Scan.scan_timestamp)",
+        cascade="all, delete-orphan",
+    )
 
-    def to_dict(self):
-        return {
-            "id":         self.id,
-            "user_id":    self.user_id,
-            "name":       self.name,
-            "age":        self.age,
-            "gender":     self.gender,
-            "phone":      self.phone,
-            "symptoms":   self.symptoms,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "scan":       self.scan.to_dict() if self.scan else None,
+    def to_dict(self, include_scans: bool = False):
+        latest = self.scans[0] if self.scans else None
+        data = {
+            "id":          self.id,
+            "user_id":     self.user_id,
+            "name":        self.user.full_name if self.user else None,   # live, never stored
+            "email":       self.user.email if self.user else None,
+            "age":         self.age,
+            "gender":      self.gender,
+            "phone":       self.phone,
+            "created_at":  self.created_at.isoformat() if self.created_at else None,
+            "updated_at":  self.updated_at.isoformat() if self.updated_at else None,
+            "total_scans": len(self.scans),
+            "scan":        latest.to_dict() if latest else None,   # latest scan, kept for backward compat
         }
+        if include_scans:
+            data["scans"] = [s.to_dict() for s in self.scans]
+        return data
 
 
 class Scan(Base):
@@ -99,10 +136,11 @@ class Scan(Base):
     gradcam_performed      = Column(Boolean,     default=False)
     file_name              = Column(String(255), nullable=True)
     report_text            = Column(Text,        nullable=True)
+    symptoms               = Column(Text,        nullable=True)  # NEW — reason for THIS scan
 
-    patient = relationship("Patient",       back_populates="scan")
+    patient = relationship("Patient",       back_populates="scans")
     notes   = relationship("ClinicalNote",  back_populates="scan",
-                           cascade="all, delete-orphan")  # NEW
+                           cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -115,6 +153,7 @@ class Scan(Base):
             "gradcam_performed":      self.gradcam_performed,
             "file_name":              self.file_name,
             "report_text":            self.report_text,
+            "symptoms":               self.symptoms,
         }
 
 
@@ -200,60 +239,77 @@ def get_user_by_id(user_id: int):
         db.close()
 
 
-# ─── Patient CRUD ─────────────────────────────────────────────────────────────
+# ─── Patient Profile CRUD ─────────────────────────────────────────────────────
 
-def create_patient(name, age, gender, phone=None, symptoms=None, user_id=None) -> int:
+def get_or_create_patient_profile(user_id: int, age=None, gender=None, phone=None) -> dict:
+    """
+    One profile per user — get it if it exists, create it if it doesn't,
+    update whichever fields were passed in either case.
+
+    `name` is intentionally NOT a parameter here: it is never stored on
+    Patient. It always comes from User.full_name at read time, so every
+    caller automatically gets the current account name with zero risk
+    of it drifting or needing to be retyped.
+    """
     db = SessionLocal()
     try:
-        patient = Patient(
-            user_id  = user_id,
-            name     = name.strip(),
-            age      = int(age),
-            gender   = gender.strip(),
-            phone    = phone.strip() if phone else None,
-            symptoms = symptoms.strip() if symptoms else None,
-        )
-        db.add(patient)
+        patient = db.query(Patient).filter(Patient.user_id == user_id).first()
+        if patient is None:
+            patient = Patient(user_id=user_id)
+            db.add(patient)
+
+        if age is not None and str(age).strip() != "":
+            patient.age = int(age)
+        if gender:
+            patient.gender = gender.strip()
+        if phone is not None:
+            patient.phone = phone.strip() or None
+
+        patient.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(patient)
-        print(f"✓ Patient saved — id={patient.id}, name='{patient.name}'")
-        return patient.id
+        _ = patient.user  # eager-touch for to_dict()
+        result = patient.to_dict()
+        print(f"✓ Patient profile upserted — user_id={user_id}, patient_id={patient.id}")
+        return result
     except Exception:
         db.rollback(); raise
     finally:
         db.close()
 
 
-def get_patients(page=1, per_page=20, search=None, user_id=None) -> dict:
-    """Paginated list scoped to a specific user (patient view)."""
-    per_page = min(per_page, 100)
+def get_patient_profile_by_user(user_id: int):
+    """Returns the current user's own profile, or None if they haven't set one up yet."""
     db = SessionLocal()
     try:
-        query = db.query(Patient)
-        if user_id:
-            query = query.filter(Patient.user_id == user_id)
-        if search:
-            query = query.filter(Patient.name.ilike(f"%{search}%"))
-        total    = query.count()
-        patients = (query.order_by(Patient.created_at.desc())
-                        .offset((page - 1) * per_page).limit(per_page).all())
-        return {"total": total, "page": page, "per_page": per_page,
-                "patients": [p.to_dict() for p in patients]}
+        p = db.query(Patient).filter(Patient.user_id == user_id).first()
+        return p.to_dict() if p else None
     finally:
         db.close()
+
+
+def get_patients(user_id: int) -> dict:
+    """
+    Backward-compatible shape for GET /patients — wraps the single
+    profile belonging to `user_id` in a list (0 or 1 entries).
+    """
+    profile  = get_patient_profile_by_user(user_id)
+    patients = [profile] if profile else []
+    return {"total": len(patients), "patients": patients}
 
 
 def get_all_patients(page=1, per_page=20, search=None) -> dict:
     """
-    NEW — Doctor view: returns ALL patients across all users.
-    Optionally filter by patient name.
+    Doctor view: returns ALL patient profiles across all users, each with
+    the live account name/email joined in. Search matches on the
+    account's full_name (since Patient no longer stores name itself).
     """
     per_page = min(per_page, 100)
     db = SessionLocal()
     try:
-        query = db.query(Patient)
+        query = db.query(Patient).join(User, Patient.user_id == User.id)
         if search:
-            query = query.filter(Patient.name.ilike(f"%{search}%"))
+            query = query.filter(User.full_name.ilike(f"%{search}%"))
         total    = query.count()
         patients = (query.order_by(Patient.created_at.desc())
                         .offset((page - 1) * per_page).limit(per_page).all())
@@ -263,11 +319,11 @@ def get_all_patients(page=1, per_page=20, search=None) -> dict:
         db.close()
 
 
-def get_patient_by_id(patient_id: int):
+def get_patient_by_id(patient_id: int, include_scans: bool = False):
     db = SessionLocal()
     try:
         p = db.query(Patient).filter(Patient.id == patient_id).first()
-        return p.to_dict() if p else None
+        return p.to_dict(include_scans=include_scans) if p else None
     finally:
         db.close()
 
@@ -290,7 +346,7 @@ def delete_patient(patient_id: int) -> bool:
 
 def save_scan(predicted_class, confidence_score, segmentation_performed=False,
               gradcam_performed=False, file_name=None, report_text=None,
-              patient_id=None) -> int:
+              patient_id=None, symptoms=None) -> int:
     db = SessionLocal()
     try:
         scan = Scan(
@@ -301,6 +357,7 @@ def save_scan(predicted_class, confidence_score, segmentation_performed=False,
             gradcam_performed      = gradcam_performed,
             file_name              = file_name or None,
             report_text            = report_text or None,
+            symptoms               = symptoms or None,
         )
         db.add(scan); db.commit(); db.refresh(scan)
         print(f"✓ Scan saved — id={scan.id}, class='{scan.predicted_class}'")

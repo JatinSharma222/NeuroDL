@@ -53,15 +53,16 @@ from src.database import (
     SessionLocal,
     Patient,
     Scan,
-    add_clinical_note,       # new
-    create_patient,
+    add_clinical_note,
     create_user,
     delete_patient,
     delete_scan,
-    get_all_patients,        # new
-    get_doctor_stats,        # new
-    get_notes_for_scan,      # new
+    get_all_patients,
+    get_doctor_stats,
+    get_notes_for_scan,
+    get_or_create_patient_profile,   # NEW — replaces create_patient
     get_patient_by_id,
+    get_patient_profile_by_user,     # NEW
     get_patients,
     get_scan_by_id,
     get_scans,
@@ -275,50 +276,55 @@ def refresh_token(current_user):
 @app.route("/patients", methods=["POST"])
 @require_auth
 def register_patient(current_user):
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "JSON body required"}), 400
+    """
+    Save/update the CURRENT user's own profile (age/gender/phone).
+    There is no `name` field — name always comes from the account
+    (users.full_name) and is never accepted from the request body,
+    so it's impossible to set a name on someone else's behalf.
+    """
+    data = request.get_json(silent=True) or {}
 
-    name   = data.get("name",   "").strip()
     age    = data.get("age")
-    gender = data.get("gender", "").strip()
+    gender = (data.get("gender") or "").strip() or None
+    phone  = data.get("phone")
 
-    errors = []
-    if not name:    errors.append("name is required")
-    if age is None: errors.append("age is required")
-    elif not str(age).isdigit() or not (0 < int(age) < 130):
-        errors.append("age must be between 1 and 129")
-    if not gender: errors.append("gender is required")
-    if errors:
-        return jsonify({"error": "Validation failed", "details": errors}), 400
+    if age is not None and (not str(age).isdigit() or not (0 < int(age) < 130)):
+        return jsonify({"error": "Validation failed",
+                        "details": ["age must be between 1 and 129"]}), 400
 
     try:
-        patient_id = create_patient(
-            name=name, age=int(age), gender=gender,
-            phone=data.get("phone"), symptoms=data.get("symptoms"),
-            user_id=int(current_user["sub"]),
+        profile = get_or_create_patient_profile(
+            user_id = int(current_user["sub"]),
+            age=age, gender=gender, phone=phone,
         )
-        print(f"[PATIENT] Registered — id={patient_id}, user={current_user['email']}")
-        return jsonify({"patient_id": patient_id,
-                        "message": f"Patient '{name}' registered successfully"}), 201
+        print(f"[PATIENT] Profile saved — user={current_user['email']}")
+        return jsonify({
+            "patient_id": profile["id"],
+            "patient":    profile,
+            "message":    f"Profile saved for {profile['name']}",
+        }), 200
     except Exception:
         print(f"[PATIENT] Error: {traceback.format_exc()}")
-        return jsonify({"error": "Failed to register patient"}), 500
+        return jsonify({"error": "Failed to save profile"}), 500
+
+
+@app.route("/patients/me", methods=["GET"])
+@require_auth
+def my_patient_profile(current_user):
+    """Returns the current user's own profile, or {"patient": null} if not set up yet."""
+    try:
+        profile = get_patient_profile_by_user(int(current_user["sub"]))
+        return jsonify({"patient": profile}), 200
+    except Exception:
+        return jsonify({"error": "Failed to fetch profile"}), 500
 
 
 @app.route("/patients", methods=["GET"])
 @require_auth
 def list_patients(current_user):
     try:
-        result = get_patients(
-            page     = max(1, int(request.args.get("page", 1))),
-            per_page = max(1, min(int(request.args.get("per_page", 20)), 100)),
-            search   = request.args.get("search"),
-            user_id  = int(current_user["sub"]),
-        )
+        result = get_patients(user_id=int(current_user["sub"]))
         return jsonify(result), 200
-    except ValueError:
-        return jsonify({"error": "Invalid pagination parameters"}), 400
     except Exception:
         return jsonify({"error": "Failed to fetch patients"}), 500
 
@@ -367,7 +373,17 @@ def predict(current_user):
         return jsonify({"error": "Empty filename"}), 400
 
     raw_pid    = request.form.get("patient_id", "").strip()
-    patient_id = int(raw_pid) if raw_pid.isdigit() else None
+    symptoms   = (request.form.get("symptoms") or "").strip() or None
+
+    # SECURITY: never trust a client-supplied patient_id — a user could
+    # otherwise pass another account's profile id and write/read across
+    # accounts. The scan is always attached to the CALLER's own profile,
+    # which is auto-created on first use. raw_pid is ignored entirely.
+    own_profile = get_or_create_patient_profile(user_id=int(current_user["sub"]))
+    patient_id  = own_profile["id"]
+    if raw_pid and raw_pid.isdigit() and int(raw_pid) != patient_id:
+        print(f"[PREDICT] ⚠ Ignored client-supplied patient_id={raw_pid} "
+              f"(does not belong to {current_user['email']}) — using own profile {patient_id}")
 
     print(f"\n{'='*55}")
     print(f"[PREDICT] User      : {current_user['email']}")
@@ -462,18 +478,17 @@ def predict(current_user):
         emit_progress(socket_id, "report", "running")
         t0 = time.time()
         try:
-            patient_record = get_patient_by_id(patient_id) if patient_id else None
-            report_text    = generate_report(
+            report_text = generate_report(
                 class_name             = class_name,
                 confidence             = confidence,
                 segmentation_performed = response["segmentation_performed"],
                 gradcam_performed      = response["gradcam_performed"],
                 model_accuracy         = "94.92%",
                 patient_id             = patient_id,
-                patient_name     = patient_record.get("name")     if patient_record else current_user.get("full_name"),
-                patient_age      = patient_record.get("age")      if patient_record else None,
-                patient_gender   = patient_record.get("gender")   if patient_record else None,
-                patient_symptoms = patient_record.get("symptoms") if patient_record else None,
+                patient_name           = own_profile.get("name") or current_user.get("full_name"),
+                patient_age            = own_profile.get("age"),
+                patient_gender         = own_profile.get("gender"),
+                patient_symptoms       = symptoms,
             )
             response["report"] = report_text
             if report_text:
@@ -492,6 +507,7 @@ def predict(current_user):
                 file_name              = file.filename,
                 report_text            = response["report"],
                 patient_id             = patient_id,
+                symptoms               = symptoms,
             )
             response["scan_id"] = scan_id
             print(f"[PREDICT] ✓ Saved — scan_id={scan_id}\n")
@@ -741,10 +757,13 @@ def doctor_patients(current_user):
 @require_auth
 @require_doctor
 def doctor_patient_detail(current_user, patient_id):
+    """Full patient profile + ALL scans (with clinical notes attached) — doctor view."""
     try:
-        patient = get_patient_by_id(patient_id)
+        patient = get_patient_by_id(patient_id, include_scans=True)
         if not patient:
             return jsonify({"error": f"Patient {patient_id} not found"}), 404
+        for s in (patient.get("scans") or []):
+            s["notes"] = get_notes_for_scan(s["id"])
         if patient.get("scan") and patient["scan"].get("id"):
             patient["scan"]["notes"] = get_notes_for_scan(patient["scan"]["id"])
         return jsonify(patient), 200

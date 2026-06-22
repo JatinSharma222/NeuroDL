@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 
 const GENDERS = ["Male", "Female", "Other"];
@@ -31,18 +31,54 @@ const optionalStyle = {
   marginLeft: 5,
 };
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
+
+/**
+ * PatientForm.jsx  —  NeuroDL v2.1
+ * ─────────────────────────────────
+ * Step 1 of the diagnosis flow.
+ *
+ * CHANGED: there is no more "Full Name" input. Your name always comes
+ * live from your account (set at registration) — it's shown read-only
+ * here and can never be typed in or mixed up with someone else's.
+ *
+ * Age / Gender / Phone are your PROFILE — saved once, reused every time.
+ * They're pre-filled from your existing profile (GET /patients/me) if
+ * you've filled them in before, and editable any time.
+ *
+ * Symptoms moved to step 2 — "reason for THIS scan" changes per visit,
+ * so it belongs with the upload, not your permanent profile.
+ */
 const PatientForm = ({ onSuccess }) => {
-  const { authFetch } = useAuth();
-  const [form, setForm] = useState({
-    name:     "",
-    age:      "",
-    gender:   "",
-    phone:    "",
-    symptoms: "",
-  });
-  const [errors,   setErrors]   = useState({});
-  const [loading,  setLoading]  = useState(false);
-  const [apiError, setApiError] = useState("");
+  const { authFetch, user } = useAuth();
+  const [form, setForm] = useState({ age: "", gender: "", phone: "" });
+  const [errors,    setErrors]    = useState({});
+  const [loading,   setLoading]   = useState(false);
+  const [apiError,  setApiError]  = useState("");
+  const [prefilled, setPrefilled] = useState(false);
+
+  // ── Prefill from existing profile, if any ──────────────────────
+  useEffect(() => {
+    const loadProfile = async () => {
+      try {
+        const res = await authFetch(`${API_URL}/patients/me`);
+        if (!res.ok) return;
+        const { patient } = await res.json();
+        if (patient) {
+          setForm({
+            age:    patient.age    != null ? String(patient.age) : "",
+            gender: patient.gender || "",
+            phone:  patient.phone  || "",
+          });
+        }
+      } catch {
+        // Non-fatal — user can just fill the form fresh
+      } finally {
+        setPrefilled(true);
+      }
+    };
+    loadProfile();
+  }, []);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -52,8 +88,6 @@ const PatientForm = ({ onSuccess }) => {
 
   const validate = () => {
     const errs = {};
-    if (!form.name.trim())
-      errs.name = "Patient name is required";
     if (!form.age)
       errs.age = "Age is required";
     else if (isNaN(form.age) || +form.age < 1 || +form.age > 129)
@@ -75,26 +109,23 @@ const PatientForm = ({ onSuccess }) => {
 
     setLoading(true);
     try {
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
       const res = await authFetch(`${API_URL}/patients`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          name:     form.name.trim(),
-          age:      parseInt(form.age),
-          gender:   form.gender,
-          phone:    form.phone.trim() || null,
-          symptoms: form.symptoms.trim() || null,
+          age:    parseInt(form.age),
+          gender: form.gender,
+          phone:  form.phone.trim() || null,
         }),
       });
 
       const data = await res.json();
       if (!res.ok) {
-        setApiError(data.error || "Failed to register patient. Please try again.");
+        setApiError(data.error || "Failed to save profile. Please try again.");
         return;
       }
 
-      onSuccess(data.patient_id, form.name.trim());
+      onSuccess(data.patient_id, data.patient?.name || user?.full_name || "");
     } catch {
       setApiError("Cannot reach the server. Make sure the backend is running.");
     } finally {
@@ -136,7 +167,7 @@ const PatientForm = ({ onSuccess }) => {
             margin:     0,
           }}
         >
-          Patient Details
+          Your Details
         </h2>
         <p
           style={{
@@ -146,7 +177,7 @@ const PatientForm = ({ onSuccess }) => {
             fontSize:     "0.95rem",
           }}
         >
-          Fill in the patient information before uploading the MRI scan
+          Saved to your account — you only need to keep this up to date, not retype it
         </p>
       </div>
 
@@ -156,29 +187,31 @@ const PatientForm = ({ onSuccess }) => {
           display:             "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
           gap:                 "var(--spacing-lg)",
-          marginBottom:        "var(--spacing-lg)",
+          marginBottom:        "var(--spacing-xl)",
         }}
       >
-        {/* Name */}
+        {/* Name — read-only, pulled live from the account */}
         <div>
-          <label style={labelStyle}>
-            Full Name
-            <span style={{ color: "var(--color-primary)", marginLeft: 2 }}>*</span>
-          </label>
-          <input
-            name="name"
-            value={form.name}
-            onChange={handleChange}
-            onFocus={onFocus}
-            onBlur={onBlur}
-            placeholder="Name"
-            maxLength={150}
-            disabled={loading}
-            style={{ ...fieldStyle, borderColor: errors.name ? "#dc2626" : "var(--color-border)" }}
-          />
-          {errors.name && (
-            <p style={{ color: "#dc2626", fontSize: "0.78rem", marginTop: 4 }}>{errors.name}</p>
-          )}
+          <label style={labelStyle}>Full Name</label>
+          <div
+            style={{
+              ...fieldStyle,
+              display:    "flex",
+              alignItems: "center",
+              gap:        8,
+              background: "var(--color-bg-tertiary)",
+              color:      "var(--color-text-secondary)",
+              cursor:     "default",
+            }}
+          >
+            <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ flexShrink: 0, opacity: 0.6 }}>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 11V7a4 4 0 10-8 0v4M5 11h14l-1 10H6L5 11z" />
+            </svg>
+            {user?.full_name || "—"}
+          </div>
+          <p style={{ fontSize: "0.72rem", color: "var(--color-text-light)", marginTop: 4 }}>
+            From your account · edit it in Sign Out → Account settings
+          </p>
         </div>
 
         {/* Age */}
@@ -260,33 +293,6 @@ const PatientForm = ({ onSuccess }) => {
         </div>
       </div>
 
-      {/* Symptoms */}
-      <div style={{ marginBottom: "var(--spacing-xl)" }}>
-        <label style={labelStyle}>
-          Symptoms / Reason for Scan<span style={optionalStyle}>(optional)</span>
-        </label>
-        <textarea
-          name="symptoms"
-          value={form.symptoms}
-          onChange={handleChange}
-          onFocus={onFocus}
-          onBlur={onBlur}
-          placeholder="e.g. Persistent headaches, blurred vision, dizziness for 3 weeks..."
-          maxLength={500}
-          rows={3}
-          disabled={loading}
-          style={{
-            ...fieldStyle,
-            resize:     "vertical",
-            lineHeight: 1.6,
-            minHeight:  90,
-          }}
-        />
-        <p style={{ fontSize: "0.75rem", color: "var(--color-text-light)", marginTop: 4 }}>
-          {form.symptoms.length}/500
-        </p>
-      </div>
-
       {/* API error */}
       {apiError && (
         <div className="alert alert-error" style={{ marginBottom: "var(--spacing-lg)" }}>
@@ -303,7 +309,7 @@ const PatientForm = ({ onSuccess }) => {
       <div style={{ textAlign: "center" }}>
         <button
           onClick={handleSubmit}
-          disabled={loading}
+          disabled={loading || !prefilled}
           className={`btn ${loading ? "btn-disabled" : "btn-primary"} text-lg px-12 py-4`}
         >
           {loading ? (
@@ -312,7 +318,7 @@ const PatientForm = ({ onSuccess }) => {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                   d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              Registering...
+              Saving...
             </span>
           ) : (
             <span style={{ display: "flex", alignItems: "center", gap: 10 }}>

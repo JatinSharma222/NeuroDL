@@ -7,9 +7,9 @@
 "use client";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth } from "../../context/AuthContext";
-import DoctorDashboard from "../../components/DoctorDashboard";
-import Navbar from "../../components/Navbar";
+import { useAuth } from "../context/AuthContext";
+import DoctorDashboard from "./DoctorDashboard";
+import Navbar from "../components/Navbar";
 
 export default function DoctorPage() {
   const { user, loading } = useAuth();

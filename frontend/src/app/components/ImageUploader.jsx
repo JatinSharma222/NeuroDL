@@ -9,6 +9,10 @@ import APIRequest from "./APIRequest";
  * Accepts patientId prop from InferenceForm and forwards it to APIRequest
  * so the scan is saved linked to the correct patient.
  *
+ * CHANGED: "Symptoms / Reason for Scan" now lives here (per scan) instead
+ * of on the permanent profile in step 1 — the reason for a visit changes
+ * every time, your profile (age/gender/phone) doesn't.
+ *
  * Props:
  *   patientId (int | null) — patient FK from /patients POST
  */
@@ -41,6 +45,7 @@ const ImageUploader = ({ patientId = null }) => {
   const [selectedImage, setSelectedImage] = useState(null);
   const [sizeError,     setSizeError]     = useState("");
   const [isMounted,     setIsMounted]     = useState(false);
+  const [symptoms,      setSymptoms]      = useState("");
 
   useEffect(() => { setIsMounted(true); }, []);
 
@@ -259,9 +264,37 @@ const ImageUploader = ({ patientId = null }) => {
         )}
       </div>
 
-      {/* ── Analysis — pass patientId to APIRequest ── */}
+      {/* ── Reason for THIS scan (per-visit, not part of your profile) ── */}
       {selectedImage && !sizeError && (
-        <APIRequest image={selectedImage} patientId={patientId} />
+        <div style={{ maxWidth: 560, margin: "0 auto", textAlign: "left" }}>
+          <label style={{ display: "block", fontWeight: 700, fontSize: "0.85rem", marginBottom: 6, color: "var(--color-text-primary)" }}>
+            Symptoms / Reason for this Scan
+            <span style={{ fontWeight: 400, fontSize: "0.78rem", color: "var(--color-text-light)", marginLeft: 5 }}>(optional)</span>
+          </label>
+          <textarea
+            value={symptoms}
+            onChange={(e) => setSymptoms(e.target.value)}
+            placeholder="e.g. Persistent headaches, blurred vision, dizziness for 3 weeks..."
+            maxLength={500}
+            rows={3}
+            style={{
+              width: "100%", padding: "11px 14px",
+              border: "1.5px solid var(--color-border)",
+              borderRadius: "var(--radius-sm)",
+              fontSize: "0.95rem", outline: "none",
+              background: "white", color: "var(--color-text-primary)",
+              resize: "vertical", lineHeight: 1.6, minHeight: 80,
+            }}
+          />
+          <p style={{ fontSize: "0.75rem", color: "var(--color-text-light)", marginTop: 4 }}>
+            {symptoms.length}/500 · saved with this specific scan, not your permanent profile
+          </p>
+        </div>
+      )}
+
+      {/* ── Analysis — pass patientId + symptoms to APIRequest ── */}
+      {selectedImage && !sizeError && (
+        <APIRequest image={selectedImage} patientId={patientId} symptoms={symptoms} />
       )}
     </div>
   );

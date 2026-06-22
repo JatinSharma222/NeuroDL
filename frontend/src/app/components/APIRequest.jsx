@@ -54,7 +54,7 @@ const tumorInfo = {
   },
 };
 
-const APIRequest = ({ image, patientId = null }) => {
+const APIRequest = ({ image, patientId = null, symptoms = "" }) => {
   const { authFetch } = useAuth();
   const toast = useToast();
 
@@ -152,6 +152,7 @@ const APIRequest = ({ image, patientId = null }) => {
     const formData = new FormData();
     formData.append("image", image);
     if (patientId != null) formData.append("patient_id", String(patientId));
+    if (symptoms && symptoms.trim()) formData.append("symptoms", symptoms.trim());
     if (socketId) formData.append("socket_id", socketId);
 
     try {
