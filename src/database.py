@@ -136,7 +136,9 @@ class Scan(Base):
     gradcam_performed      = Column(Boolean,     default=False)
     file_name              = Column(String(255), nullable=True)
     report_text            = Column(Text,        nullable=True)
-    symptoms               = Column(Text,        nullable=True)  # NEW — reason for THIS scan
+    symptoms               = Column(Text,        nullable=True)  # reason for THIS scan
+    gradcam_image_key      = Column(String(255), nullable=True)  # storage key, NOT the image itself
+    segment_image_key      = Column(String(255), nullable=True)  # resolved via image_storage.py
 
     patient = relationship("Patient",       back_populates="scans")
     notes   = relationship("ClinicalNote",  back_populates="scan",
@@ -154,6 +156,8 @@ class Scan(Base):
             "file_name":              self.file_name,
             "report_text":            self.report_text,
             "symptoms":               self.symptoms,
+            "has_gradcam_image":      bool(self.gradcam_image_key),
+            "has_segment_image":      bool(self.segment_image_key),
         }
 
 
@@ -346,7 +350,8 @@ def delete_patient(patient_id: int) -> bool:
 
 def save_scan(predicted_class, confidence_score, segmentation_performed=False,
               gradcam_performed=False, file_name=None, report_text=None,
-              patient_id=None, symptoms=None) -> int:
+              patient_id=None, symptoms=None,
+              gradcam_image_key=None, segment_image_key=None) -> int:
     db = SessionLocal()
     try:
         scan = Scan(
@@ -358,12 +363,38 @@ def save_scan(predicted_class, confidence_score, segmentation_performed=False,
             file_name              = file_name or None,
             report_text            = report_text or None,
             symptoms               = symptoms or None,
+            gradcam_image_key      = gradcam_image_key or None,
+            segment_image_key      = segment_image_key or None,
         )
         db.add(scan); db.commit(); db.refresh(scan)
         print(f"✓ Scan saved — id={scan.id}, class='{scan.predicted_class}'")
         return scan.id
     except Exception:
         db.rollback(); raise
+    finally:
+        db.close()
+
+
+def get_scan_image_key(scan_id: int, kind: str):
+    """kind: 'gradcam' | 'segment'. Returns the storage key, or None."""
+    db = SessionLocal()
+    try:
+        scan = db.query(Scan).filter(Scan.id == scan_id).first()
+        if not scan:
+            return None
+        return scan.gradcam_image_key if kind == "gradcam" else scan.segment_image_key
+    finally:
+        db.close()
+
+
+def get_scan_owner_user_id(scan_id: int):
+    """Resolves scan -> patient -> user_id, for ownership checks. None if not found/orphaned."""
+    db = SessionLocal()
+    try:
+        scan = db.query(Scan).filter(Scan.id == scan_id).first()
+        if not scan or not scan.patient:
+            return None
+        return scan.patient.user_id
     finally:
         db.close()
 
@@ -428,10 +459,14 @@ def get_scan_by_id(scan_id: int):
 
 
 def delete_scan(scan_id: int) -> bool:
+    from src.image_storage import delete_image  # local import avoids a hard dependency at module load
     db = SessionLocal()
     try:
         scan = db.query(Scan).filter(Scan.id == scan_id).first()
         if not scan: return False
+        for key in (scan.gradcam_image_key, scan.segment_image_key):
+            if key:
+                delete_image(key)
         db.delete(scan); db.commit()
         print(f"✓ Scan id={scan_id} deleted")
         return True

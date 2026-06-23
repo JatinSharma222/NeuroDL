@@ -40,7 +40,7 @@ from io import BytesIO
 
 import numpy as np
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response, redirect
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
@@ -60,16 +60,25 @@ from src.database import (
     get_all_patients,
     get_doctor_stats,
     get_notes_for_scan,
-    get_or_create_patient_profile,   # NEW — replaces create_patient
+    get_or_create_patient_profile,
     get_patient_by_id,
-    get_patient_profile_by_user,     # NEW
+    get_patient_profile_by_user,
     get_patients,
     get_scan_by_id,
+    get_scan_image_key,      # NEW
+    get_scan_owner_user_id,  # NEW
     get_scans,
     get_user_by_email,
     get_user_by_id,
     init_db,
     save_scan,
+)
+from src.image_storage import (
+    new_key as new_image_key,
+    save_image as store_image,
+    read_image_bytes,
+    get_signed_url,
+    STORAGE_BACKEND,
 )
 from src.gradcam import generate_gradcam, get_gradcam_heatmap
 from src.inference import gradcam_pseudo_segmentation
@@ -430,6 +439,11 @@ def predict(current_user):
             "patient_id":             patient_id,
             "class_probabilities":    class_probabilities,
         }
+        # Storage keys — populated below if persistence succeeds. Kept
+        # separate from `response` since these are internal (never sent
+        # to the browser); the browser already has the base64 image.
+        gradcam_image_key = None
+        segment_image_key = None
 
         # Stage 3: Grad-CAM + Segmentation (tumour only)
         if predicted_class != 2:
@@ -455,6 +469,16 @@ def predict(current_user):
                     response["gradcam_image"]     = gradcam_b64
                     response["gradcam_performed"] = True
                     print("[PREDICT] ✓ Grad-CAM complete")
+
+                    # Persist for later viewing (doctor portal / history).
+                    # Best-effort: a storage failure must never break the
+                    # live result the patient is about to see.
+                    try:
+                        key = new_image_key("gradcam")
+                        if store_image(key, base64.b64decode(gradcam_b64)):
+                            gradcam_image_key = key
+                    except Exception as e:
+                        print(f"[PREDICT] ⚠ Grad-CAM persistence skipped: {e}")
             except Exception as e:
                 print(f"[PREDICT] ✗ Grad-CAM: {e}")
             emit_progress(socket_id, "gradcam", "done", duration=round(time.time()-t0, 2))
@@ -465,9 +489,17 @@ def predict(current_user):
                 try:
                     buf = gradcam_pseudo_segmentation(image=image_np, heatmap=raw_heatmap)
                     buf.seek(0)
-                    response["segment_image"]          = base64.b64encode(buf.getvalue()).decode()
+                    segment_bytes = buf.getvalue()
+                    response["segment_image"]          = base64.b64encode(segment_bytes).decode()
                     response["segmentation_performed"] = True
                     print("[PREDICT] ✓ Pseudo-segmentation complete")
+
+                    try:
+                        key = new_image_key("segment")
+                        if store_image(key, segment_bytes):
+                            segment_image_key = key
+                    except Exception as e:
+                        print(f"[PREDICT] ⚠ Segmentation persistence skipped: {e}")
                 except Exception as e:
                     print(f"[PREDICT] ✗ Segmentation: {e}")
             emit_progress(socket_id, "segmentation", "done", duration=round(time.time()-t0, 2))
@@ -508,6 +540,8 @@ def predict(current_user):
                 report_text            = response["report"],
                 patient_id             = patient_id,
                 symptoms               = symptoms,
+                gradcam_image_key      = gradcam_image_key,
+                segment_image_key      = segment_image_key,
             )
             response["scan_id"] = scan_id
             print(f"[PREDICT] ✓ Saved — scan_id={scan_id}\n")
@@ -609,10 +643,15 @@ def history(current_user):
 @app.route("/history/<int:scan_id>", methods=["GET"])
 @require_auth
 def history_detail(current_user, scan_id):
+    """A scan can only be viewed by the patient who owns it, or by a doctor."""
     try:
-        scan = get_scan_by_id(scan_id)
-        if not scan:
+        owner_user_id = get_scan_owner_user_id(scan_id)
+        if owner_user_id is None:
             return jsonify({"error": f"Scan {scan_id} not found"}), 404
+        if current_user.get("role") != "doctor" and owner_user_id != int(current_user["sub"]):
+            return jsonify({"error": "You do not have access to this scan"}), 403
+
+        scan = get_scan_by_id(scan_id)
         return jsonify(scan), 200
     except Exception:
         return jsonify({"error": "Failed to fetch scan"}), 500
@@ -621,13 +660,66 @@ def history_detail(current_user, scan_id):
 @app.route("/history/<int:scan_id>", methods=["DELETE"])
 @require_auth
 def history_delete(current_user, scan_id):
+    """A scan can only be deleted by the patient who owns it, or by a doctor."""
     try:
+        owner_user_id = get_scan_owner_user_id(scan_id)
+        if owner_user_id is None:
+            return jsonify({"error": f"Scan {scan_id} not found"}), 404
+        if current_user.get("role") != "doctor" and owner_user_id != int(current_user["sub"]):
+            return jsonify({"error": "You do not have access to this scan"}), 403
+
         deleted = delete_scan(scan_id)
         if not deleted:
             return jsonify({"error": f"Scan {scan_id} not found"}), 404
         return jsonify({"message": f"Scan {scan_id} deleted"}), 200
     except Exception:
         return jsonify({"error": "Failed to delete scan"}), 500
+
+
+@app.route("/scans/<int:scan_id>/image/<kind>", methods=["GET"])
+@require_auth
+def scan_image(current_user, scan_id, kind):
+    """
+    Serves a persisted Grad-CAM or segmentation heatmap for one scan.
+
+    kind: "gradcam" | "segment"
+
+    Access: the scan's owning patient, or any doctor — same rule as
+    every other per-scan endpoint. Never trust a client-supplied
+    patient_id anywhere; we resolve ownership server-side from the
+    scan_id itself.
+
+    Backend-agnostic: streams bytes directly when running on local
+    disk, or 302-redirects to a short-lived signed URL when running
+    on S3 — callers (fetch()) don't need to know or care which.
+    """
+    if kind not in ("gradcam", "segment"):
+        return jsonify({"error": "kind must be 'gradcam' or 'segment'"}), 400
+
+    try:
+        owner_user_id = get_scan_owner_user_id(scan_id)
+        if owner_user_id is None:
+            return jsonify({"error": f"Scan {scan_id} not found"}), 404
+        if current_user.get("role") != "doctor" and owner_user_id != int(current_user["sub"]):
+            return jsonify({"error": "You do not have access to this scan"}), 403
+
+        key = get_scan_image_key(scan_id, kind)
+        if not key:
+            return jsonify({"error": f"No {kind} image was saved for this scan"}), 404
+
+        if STORAGE_BACKEND == "s3":
+            url = get_signed_url(key)
+            if not url:
+                return jsonify({"error": "Failed to generate image URL"}), 500
+            return redirect(url, code=302)
+
+        image_bytes = read_image_bytes(key)
+        if image_bytes is None:
+            return jsonify({"error": "Image file missing on disk"}), 404
+        return Response(image_bytes, mimetype="image/png")
+    except Exception:
+        print(f"[SCAN_IMAGE] Error:\n{traceback.format_exc()}")
+        return jsonify({"error": "Failed to fetch image"}), 500
 
 
 # ─── Stats / Analytics ────────────────────────────────────────────────────────
