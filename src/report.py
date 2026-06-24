@@ -1,23 +1,29 @@
 """
 src/report.py
 ─────────────
-LLM-powered radiology report generation for NeuroDL v2.0.
+LLM-powered radiology report generation for NeuroDL v2.1.
 
-Generates a detailed ~2-page clinical report using a locally running
-Ollama instance (llama3.1:8b) — no external API key, fully offline.
+Generates a detailed ~2-page clinical report via Groq's hosted LLM API
+(OpenAI-compatible /chat/completions endpoint). Swapped from a locally
+running Ollama instance so the backend doesn't need to carry an 8B-
+parameter model in RAM alongside TensorFlow — Groq's free tier covers
+this app's usage comfortably and the model runs on Groq's infra, not
+ours.
 
-The report is personalised using the patient's full profile:
-  name, age, gender, symptoms — all injected into the prompt so the
-  LLM can tailor clinical commentary, risk context, and recommendations
-  to the actual patient rather than producing a generic template.
+The report is personalised using the patient's profile + this scan's
+symptoms — name, age, gender, symptoms — all injected into the prompt
+so the LLM can tailor clinical commentary, risk context, and
+recommendations to the actual patient rather than a generic template.
 
-Ollama setup:
-    ollama serve
-    ollama pull llama3.1:8b
+Setup:
+    1. Create a free key at https://console.groq.com/keys
+    2. Set GROQ_API_KEY in your environment (.env / EC2 env / etc.)
 
-Environment variables (optional):
-    OLLAMA_URL   : Ollama base URL  (default: http://localhost:11434)
-    OLLAMA_MODEL : Model name       (default: llama3.1:8b)
+Environment variables:
+    GROQ_API_KEY : required — no key, no report (fails gracefully, see below)
+    GROQ_MODEL   : model id (default: "llama-3.1-8b-instant" — fast + free-tier
+                   friendly; swap to "llama-3.3-70b-versatile" for higher
+                   quality at a small latency/cost increase)
 """
 
 import os
@@ -28,11 +34,11 @@ import requests
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-OLLAMA_URL   = os.environ.get("OLLAMA_URL",   "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 
-GENERATE_ENDPOINT = f"{OLLAMA_URL}/api/generate"
-REQUEST_TIMEOUT   = 120   # seconds — longer for a detailed report
+GROQ_ENDPOINT   = "https://api.groq.com/openai/v1/chat/completions"
+REQUEST_TIMEOUT = 60   # Groq is far faster than local Ollama inference
 
 
 # ─── Clinical Knowledge Base ──────────────────────────────────────────────────
@@ -184,7 +190,7 @@ def generate_report(
     patient_symptoms:       str  = None,
 ) -> str | None:
     """
-    Generate a detailed ~2-page clinical radiology report via Ollama.
+    Generate a detailed ~2-page clinical radiology report via Groq.
 
     All patient fields are injected into the prompt so the LLM can
     personalise clinical commentary, risk factors, and recommendations.
@@ -196,16 +202,19 @@ def generate_report(
         gradcam_performed      : Whether Grad-CAM ran
         model_accuracy         : Model accuracy string
         patient_id             : DB primary key (int)
-        patient_name           : Full name from Patient record
+        patient_name           : Full name from the account (users.full_name)
         patient_age            : Age in years
         patient_gender         : Male / Female / Other
-        patient_symptoms       : Free-text symptom description
+        patient_symptoms       : Free-text reason for THIS scan
 
     Returns:
-        Formatted report string, or None if Ollama unavailable.
-        Never crashes the caller — None is handled gracefully.
+        Formatted report string, or None if Groq is unavailable/unconfigured.
+        Never crashes the caller — None is handled gracefully (the scan
+        still saves; the report panel just shows "not available").
     """
-    if not _check_ollama():
+    if not GROQ_API_KEY:
+        print("[Report] GROQ_API_KEY not set — skipping report generation. "
+              "Get a free key at https://console.groq.com/keys")
         return None
 
     try:
@@ -223,43 +232,48 @@ def generate_report(
         )
 
         payload = {
-            "model":  OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.25,   # Low = consistent, factual, clinical tone
-                "top_p":       0.9,
-                "num_predict": 1400,   # ~2 pages of clinical text
-                "repeat_penalty": 1.1, # Avoid repetitive phrasing
-            },
+            "model":       GROQ_MODEL,
+            "messages":    [{"role": "user", "content": prompt}],
+            "temperature": 0.25,   # Low = consistent, factual, clinical tone
+            "top_p":       0.9,
+            "max_tokens":  1400,   # ~2 pages of clinical text
+        }
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type":  "application/json",
         }
 
-        print(f"[Report] Calling Ollama ({OLLAMA_MODEL}) for full clinical report...")
+        print(f"[Report] Calling Groq ({GROQ_MODEL}) for full clinical report...")
         response = requests.post(
-            GENERATE_ENDPOINT,
+            GROQ_ENDPOINT,
             json    = payload,
+            headers = headers,
             timeout = REQUEST_TIMEOUT,
         )
         response.raise_for_status()
 
         data        = response.json()
-        report_text = data.get("response", "").strip()
+        report_text = data["choices"][0]["message"]["content"].strip()
 
         if not report_text:
-            print("[Report] Ollama returned empty response")
+            print("[Report] Groq returned an empty response")
             return None
 
         print(f"[Report] Generated successfully ({len(report_text)} chars)")
         return report_text
 
     except requests.exceptions.Timeout:
-        print(f"[Report] Ollama timed out after {REQUEST_TIMEOUT}s")
+        print(f"[Report] Groq timed out after {REQUEST_TIMEOUT}s")
         return None
     except requests.exceptions.ConnectionError:
-        print("[Report] Cannot connect to Ollama. Is 'ollama serve' running?")
+        print("[Report] Cannot connect to Groq — check network / API status")
         return None
     except requests.exceptions.HTTPError as e:
-        print(f"[Report] Ollama HTTP error: {e}")
+        # 401 = bad/missing key, 429 = rate limit (free tier), etc.
+        print(f"[Report] Groq HTTP error: {e} — response: {getattr(e.response, 'text', '')[:300]}")
+        return None
+    except (KeyError, IndexError):
+        print(f"[Report] Unexpected Groq response shape:\n{traceback.format_exc()}")
         return None
     except Exception:
         print(f"[Report] Unexpected error:\n{traceback.format_exc()}")
@@ -267,23 +281,6 @@ def generate_report(
 
 
 # ─── Internal Helpers ─────────────────────────────────────────────────────────
-
-def _check_ollama() -> bool:
-    """Ping Ollama before sending the full request to avoid long timeout waits."""
-    try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
-        if response.status_code == 200:
-            models     = [m["name"] for m in response.json().get("models", [])]
-            base_name  = OLLAMA_MODEL.split(":")[0]
-            if not any(base_name in m for m in models):
-                print(f"[Report] Model '{OLLAMA_MODEL}' not pulled. Run: ollama pull {OLLAMA_MODEL}")
-                return False
-            return True
-    except requests.exceptions.ConnectionError:
-        print("[Report] Ollama not reachable. Run: ollama serve")
-    except Exception:
-        print(f"[Report] Health check failed:\n{traceback.format_exc()}")
-    return False
 
 
 def _build_prompt(
