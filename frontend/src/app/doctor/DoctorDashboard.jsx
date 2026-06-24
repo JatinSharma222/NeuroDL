@@ -1,5 +1,6 @@
 "use client";
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { useAuth } from "../context/AuthContext";
 
 /**
@@ -124,23 +125,194 @@ const NoteForm = ({ scanId, onAdded, authFetch }) => {
   );
 };
 
-// ── Patient detail panel ───────────────────────────────────────────────────
-const PatientPanel = ({ patient, onClose, authFetch }) => {
-  const [notes,    setNotes]    = useState([]);
-  const [loading,  setLoading]  = useState(true);
-
-  const scan = patient?.scan;
+// ── Auth-gated heatmap image ───────────────────────────────────────────────
+// <img src="..."> can't carry a Bearer token, so we fetch through authFetch
+// and hand the browser a blob: URL instead. Works identically whether the
+// backend is serving local bytes or 302-redirecting to a signed S3 URL —
+// fetch() follows redirects transparently either way.
+const ScanImage = ({ scanId, kind, authFetch, label }) => {
+  const [url,   setUrl]   = useState(null);
+  const [state, setState] = useState("loading"); // loading | ready | missing
 
   useEffect(() => {
-    if (!scan?.id) { setLoading(false); return; }
-    authFetch(`${API_URL}/doctor/scans/${scan.id}/notes`)
-      .then(r => r.json())
-      .then(d => { setNotes(d.notes || []); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [scan?.id]);
+    let objectUrl;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authFetch(`${API_URL}/scans/${scanId}/image/${kind}`);
+        if (!res.ok) throw new Error("not found");
+        const blob = await res.blob();
+        objectUrl  = URL.createObjectURL(blob);
+        if (!cancelled) { setUrl(objectUrl); setState("ready"); }
+      } catch {
+        if (!cancelled) setState("missing");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [scanId, kind]);
 
-  const cls = scan ? (CLASS_CFG[scan.predicted_class] || CLASS_CFG["No Tumor"]) : null;
-  const fmt = iso => iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—";
+  return (
+    <div style={{
+      aspectRatio: "1/1", borderRadius: "var(--radius-md)", overflow: "hidden",
+      background: "#111", display: "flex", alignItems: "center", justifyContent: "center",
+      position: "relative",
+    }}>
+      {state === "loading" && (
+        <div style={{ width: 24, height: 24, borderRadius: "50%", border: "2.5px solid #374151", borderTop: "2.5px solid #9ca3af", animation: "spin 0.8s linear infinite" }} />
+      )}
+      {state === "missing" && (
+        <p style={{ color: "#6b7280", fontSize: "0.68rem", textAlign: "center", padding: "0 8px", margin: 0 }}>
+          {label} unavailable
+        </p>
+      )}
+      {state === "ready" && (
+        <img src={url} alt={label} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+      )}
+      <span style={{
+        position: "absolute", bottom: 4, left: 4, fontSize: "0.62rem", fontWeight: 700,
+        color: "white", background: "rgba(0,0,0,0.55)", padding: "1px 6px", borderRadius: 99,
+      }}>
+        {label}
+      </span>
+    </div>
+  );
+};
+
+// ── Confidence trend — built from scans already in `detail`, no extra fetch ──
+const ConfidenceTrend = ({ scans }) => {
+  if (!scans || scans.length < 2) return null;
+
+  const chartData = [...scans]
+    .sort((a, b) => new Date(a.scan_timestamp) - new Date(b.scan_timestamp))
+    .map(s => ({
+      label:      new Date(s.scan_timestamp).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }),
+      confidence: Math.round(s.confidence_score * 1000) / 10,
+      cls:        s.predicted_class,
+    }));
+
+  return (
+    <div style={{ marginBottom: 16, padding: "12px 14px", background: "var(--color-bg-tertiary)", borderRadius: "var(--radius-md)" }}>
+      <p style={{ margin: "0 0 8px", fontWeight: 700, fontSize: "0.78rem", color: "var(--color-text-primary)" }}>
+        Confidence trend · {scans.length} scans
+      </p>
+      <ResponsiveContainer width="100%" height={110}>
+        <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+          <XAxis dataKey="label" tick={{ fontSize: 10, fill: "#9ca3af" }} tickLine={false} axisLine={{ stroke: "#e5e7eb" }} />
+          <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#9ca3af" }} tickLine={false} axisLine={false} width={36} tickFormatter={v => `${v}%`} />
+          <Tooltip
+            formatter={(v, _n, p) => [`${v}% · ${p.payload.cls}`, "Confidence"]}
+            contentStyle={{ fontSize: "0.75rem", borderRadius: 8 }}
+          />
+          <Line type="monotone" dataKey="confidence" stroke="var(--color-primary, #e60023)" strokeWidth={2} dot={{ r: 3 }} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+};
+
+// ── Side-by-side compare of 2 selected scans ───────────────────────────────
+const CompareView = ({ scans, ids, authFetch, onClose }) => {
+  const [a, b] = ids.map(id => scans.find(s => s.id === id)).filter(Boolean);
+  if (!a || !b) return null;
+
+  const fmt   = iso => iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—";
+  const delta = ((b.confidence_score - a.confidence_score) * 100);
+  const sameClass = a.predicted_class === b.predicted_class;
+
+  const Col = ({ scan, label }) => {
+    const cls = CLASS_CFG[scan.predicted_class] || CLASS_CFG["No Tumor"];
+    return (
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p style={{ margin: "0 0 6px", fontSize: "0.68rem", fontWeight: 700, color: "var(--color-text-light)", textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</p>
+        <div style={{ border: `1.5px solid ${cls.color}`, borderRadius: "var(--radius-md)", overflow: "hidden", background: "white" }}>
+          <div style={{ padding: "10px 12px", background: cls.bg, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+            <span style={{ fontWeight: 800, fontSize: "0.88rem", color: cls.color }}>{scan.predicted_class}</span>
+            <span style={{ fontWeight: 700, fontSize: "0.8rem", color: cls.color }}>{(scan.confidence_score * 100).toFixed(2)}%</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, padding: 10 }}>
+            {scan.gradcam_performed     ? <ScanImage scanId={scan.id} kind="gradcam" authFetch={authFetch} label="Grad-CAM" />     : <div />}
+            {scan.segmentation_performed ? <ScanImage scanId={scan.id} kind="segment" authFetch={authFetch} label="Segmentation" /> : <div />}
+          </div>
+          <div style={{ padding: "0 12px 12px", fontSize: "0.74rem", color: "var(--color-text-light)" }}>
+            {fmt(scan.scan_timestamp)}
+          </div>
+          {scan.symptoms && (
+            <div style={{ padding: "0 12px 12px", fontSize: "0.76rem", color: "var(--color-text-secondary)" }}>
+              <strong>Reason:</strong> {scan.symptoms}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ marginBottom: 16, padding: 14, background: "white", border: "1.5px solid var(--color-primary)", borderRadius: "var(--radius-lg)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <p style={{ margin: 0, fontWeight: 700, fontSize: "0.85rem", color: "var(--color-text-primary)" }}>Comparing 2 scans</p>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--color-text-light)" }}>
+          <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+        </button>
+      </div>
+
+      <div style={{
+        marginBottom: 10, padding: "8px 12px", borderRadius: "var(--radius-sm)", fontSize: "0.78rem", fontWeight: 600,
+        background: sameClass ? "#f0fdf4" : "#fef9c3", color: sameClass ? "#15803d" : "#854d0e",
+      }}>
+        {sameClass
+          ? `Diagnosis unchanged: ${a.predicted_class}`
+          : `Diagnosis changed: ${a.predicted_class} → ${b.predicted_class}`}
+        {" · "}Confidence {delta >= 0 ? "+" : ""}{delta.toFixed(1)}%
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <Col scan={a} label="Earlier" />
+        <Col scan={b} label="Later" />
+      </div>
+    </div>
+  );
+};
+
+// ── Patient detail panel ───────────────────────────────────────────────────
+const PatientPanel = ({ patient, onClose, authFetch }) => {
+  const [notesByScan, setNotesByScan] = useState({});   // { [scanId]: notes[] }
+  const [loadingScan,  setLoadingScan] = useState(null); // scanId currently loading notes
+  const [expandedId,   setExpandedId]  = useState(null);
+  const [compareIds,   setCompareIds]  = useState([]);
+  const [showCompare,  setShowCompare] = useState(false);
+
+  // Backward-compatible: full list once /doctor/patients/<id> resolves,
+  // falls back to the single latest scan if that hasn't loaded yet.
+  const scans = patient?.scans || (patient?.scan ? [patient.scan] : []);
+  const fmt   = iso => iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—";
+
+  const loadNotes = (scanId) => {
+    if (notesByScan[scanId] || loadingScan === scanId) return;
+    setLoadingScan(scanId);
+    authFetch(`${API_URL}/doctor/scans/${scanId}/notes`)
+      .then(r => r.json())
+      .then(d => setNotesByScan(prev => ({ ...prev, [scanId]: d.notes || [] })))
+      .catch(() => setNotesByScan(prev => ({ ...prev, [scanId]: [] })))
+      .finally(() => setLoadingScan(null));
+  };
+
+  const toggleExpand = (scanId) => {
+    const next = expandedId === scanId ? null : scanId;
+    setExpandedId(next);
+    if (next) loadNotes(next);
+  };
+
+  const toggleCompare = (scanId) => {
+    setCompareIds(prev => {
+      if (prev.includes(scanId)) return prev.filter(id => id !== scanId);
+      if (prev.length >= 2) return [prev[1], scanId]; // keep most recent 2 picks
+      return [...prev, scanId];
+    });
+  };
 
   return (
     <div style={{
@@ -159,7 +331,7 @@ const PatientPanel = ({ patient, onClose, authFetch }) => {
             {patient.name}
           </p>
           <p style={{ margin: "2px 0 0", fontSize: "0.75rem", color: "var(--color-text-light)" }}>
-            {patient.age} yrs · {patient.gender} · Patient #{patient.id}
+            {patient.age} yrs · {patient.gender} · Patient #{patient.id} · {scans.length} scan{scans.length !== 1 ? "s" : ""}
           </p>
         </div>
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--color-text-light)" }}>
@@ -169,84 +341,156 @@ const PatientPanel = ({ patient, onClose, authFetch }) => {
         </button>
       </div>
 
-      <div style={{ padding: "var(--spacing-lg)", overflowY: "auto", maxHeight: "70vh" }}>
-        {/* Symptoms */}
-        {patient.symptoms && (
-          <div style={{ marginBottom: 16, padding: "10px 14px", background: "#f0f9ff", borderRadius: "var(--radius-md)", border: "1px solid #bae6fd" }}>
-            <p style={{ margin: "0 0 3px", fontSize: "0.7rem", fontWeight: 700, color: "#0369a1", textTransform: "uppercase", letterSpacing: "0.05em" }}>Presenting symptoms</p>
-            <p style={{ margin: 0, fontSize: "0.82rem", color: "#0c4a6e" }}>{patient.symptoms}</p>
+      <div style={{ padding: "var(--spacing-lg)", overflowY: "auto", maxHeight: "75vh" }}>
+
+        {scans.length === 0 && (
+          <div style={{ padding: 14, background: "var(--color-bg-tertiary)", borderRadius: "var(--radius-md)" }}>
+            <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--color-text-light)" }}>No scans recorded yet for this patient.</p>
           </div>
         )}
 
-        {/* Scan result */}
-        {scan ? (
-          <div style={{ marginBottom: 16 }}>
-            <p style={{ margin: "0 0 10px", fontWeight: 700, fontSize: "0.82rem", color: "var(--color-text-primary)" }}>AI Scan Result</p>
-            <div style={{
-              border: `2px solid ${cls?.color || "#e5e7eb"}`,
-              borderRadius: "var(--radius-md)", padding: 14,
-              background: cls?.bg || "white",
+        {scans.length >= 2 && <ConfidenceTrend scans={scans} />}
+
+        {/* Compare bar */}
+        {scans.length >= 2 && (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            marginBottom: 12, padding: "8px 12px", background: "var(--color-bg-tertiary)",
+            borderRadius: "var(--radius-md)", flexWrap: "wrap", gap: 8,
+          }}>
+            <span style={{ fontSize: "0.76rem", color: "var(--color-text-secondary)" }}>
+              {compareIds.length === 0 ? "Select 2 scans below to compare" : `${compareIds.length}/2 selected`}
+            </span>
+            <button
+              disabled={compareIds.length !== 2}
+              onClick={() => setShowCompare(true)}
+              className={`btn btn-sm ${compareIds.length === 2 ? "btn-primary" : "btn-disabled"}`}
+            >
+              Compare Selected
+            </button>
+          </div>
+        )}
+
+        {showCompare && compareIds.length === 2 && (
+          <CompareView scans={scans} ids={compareIds} authFetch={authFetch} onClose={() => setShowCompare(false)} />
+        )}
+
+        {/* Scan history */}
+        {scans.map(scan => {
+          const cls         = CLASS_CFG[scan.predicted_class] || CLASS_CFG["No Tumor"];
+          const isExpanded  = expandedId === scan.id;
+          const isSelected  = compareIds.includes(scan.id);
+          const notes       = notesByScan[scan.id] || [];
+          const notesLoading = loadingScan === scan.id;
+
+          return (
+            <div key={scan.id} style={{
+              marginBottom: 10, borderRadius: "var(--radius-md)",
+              border: `1.5px solid ${isSelected ? "var(--color-primary)" : cls.color}`,
+              boxShadow: isSelected ? "0 0 0 3px rgba(230,0,35,0.12)" : "none",
+              overflow: "hidden",
             }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-                <span style={{ fontWeight: 800, fontSize: "1rem", color: cls?.color }}>{scan.predicted_class}</span>
-                <span style={{ fontWeight: 700, fontSize: "0.85rem", color: cls?.color }}>
-                  {(scan.confidence_score * 100).toFixed(2)}%
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-                <span style={{ fontSize: "0.72rem", color: "var(--color-text-light)" }}>{fmt(scan.scan_timestamp)}</span>
-                {scan.gradcam_performed      && <span className="badge badge-success" style={{ fontSize: "0.68rem" }}>Grad-CAM</span>}
-                {scan.segmentation_performed && <span className="badge badge-info"    style={{ fontSize: "0.68rem" }}>Segmentation</span>}
-                {scan.report_text            && <span className="badge badge-primary" style={{ fontSize: "0.68rem" }}>AI Report</span>}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div style={{ padding: 14, background: "var(--color-bg-tertiary)", borderRadius: "var(--radius-md)", marginBottom: 16 }}>
-            <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--color-text-light)" }}>No scan recorded yet for this patient.</p>
-          </div>
-        )}
-
-        {/* Existing notes */}
-        {scan && (
-          <>
-            <p style={{ margin: "0 0 10px", fontWeight: 700, fontSize: "0.82rem", color: "var(--color-text-primary)" }}>
-              Clinical Notes {notes.length > 0 && <span style={{ color: "var(--color-text-light)", fontWeight: 400 }}>({notes.length})</span>}
-            </p>
-
-            {loading && <p style={{ fontSize: "0.82rem", color: "var(--color-text-light)" }}>Loading notes…</p>}
-
-            {!loading && notes.length === 0 && (
-              <p style={{ fontSize: "0.82rem", color: "var(--color-text-light)", fontStyle: "italic", marginBottom: 12 }}>
-                No clinical notes yet. Be the first to review.
-              </p>
-            )}
-
-            {!loading && notes.map(note => (
-              <div key={note.id} style={{
-                borderLeft: `3px solid ${VERDICT_CFG[note.verdict]?.color || "#e5e7eb"}`,
-                paddingLeft: 12, marginBottom: 12,
-              }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
-                  <VerdictBadge verdict={note.verdict} />
-                  <span style={{ fontSize: "0.72rem", color: "var(--color-text-light)" }}>
-                    Dr. {note.doctor_name} · {fmt(note.created_at)}
-                  </span>
+              {/* Row header — click to expand */}
+              <div
+                onClick={() => toggleExpand(scan.id)}
+                style={{ padding: 12, background: cls.bg, cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 10 }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onClick={e => e.stopPropagation()}
+                  onChange={() => toggleCompare(scan.id)}
+                  style={{ marginTop: 3, cursor: "pointer" }}
+                  title="Select to compare"
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
+                    <span style={{ fontWeight: 800, fontSize: "0.92rem", color: cls.color }}>{scan.predicted_class}</span>
+                    <span style={{ fontWeight: 700, fontSize: "0.82rem", color: cls.color }}>{(scan.confidence_score * 100).toFixed(2)}%</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontSize: "0.72rem", color: "var(--color-text-light)" }}>{fmt(scan.scan_timestamp)}</span>
+                    {scan.gradcam_performed      && <span className="badge badge-success" style={{ fontSize: "0.66rem" }}>Grad-CAM</span>}
+                    {scan.segmentation_performed && <span className="badge badge-info"    style={{ fontSize: "0.66rem" }}>Segmentation</span>}
+                    {scan.report_text            && <span className="badge badge-primary" style={{ fontSize: "0.66rem" }}>AI Report</span>}
+                  </div>
+                  {scan.symptoms && (
+                    <p style={{ margin: "6px 0 0", fontSize: "0.76rem", color: "var(--color-text-secondary)" }}>
+                      <strong>Reason for visit:</strong> {scan.symptoms}
+                    </p>
+                  )}
                 </div>
-                <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>
-                  {note.note_text}
-                </p>
+                <svg style={{ width: 14, height: 14, color: cls.color, transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0, marginTop: 4 }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
               </div>
-            ))}
 
-            {/* Add note form */}
-            <NoteForm
-              scanId={scan.id}
-              authFetch={authFetch}
-              onAdded={note => setNotes(prev => [note, ...prev])}
-            />
-          </>
-        )}
+              {/* Expanded detail */}
+              {isExpanded && (
+                <div style={{ padding: 14, background: "white", borderTop: `1px solid ${cls.color}33` }}>
+
+                  {/* Heatmaps */}
+                  {(scan.gradcam_performed || scan.segmentation_performed) && (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginBottom: 14, maxWidth: 360 }}>
+                      {scan.gradcam_performed      && <ScanImage scanId={scan.id} kind="gradcam" authFetch={authFetch} label="Grad-CAM" />}
+                      {scan.segmentation_performed && <ScanImage scanId={scan.id} kind="segment" authFetch={authFetch} label="Segmentation" />}
+                    </div>
+                  )}
+
+                  {/* AI report */}
+                  {scan.report_text && (
+                    <div style={{ marginBottom: 14 }}>
+                      <p style={{ margin: "0 0 6px", fontWeight: 700, fontSize: "0.78rem", color: "var(--color-text-primary)" }}>AI Report</p>
+                      <div style={{
+                        maxHeight: 180, overflowY: "auto", padding: "10px 12px",
+                        background: "var(--color-bg-tertiary)", borderRadius: "var(--radius-sm)",
+                        fontSize: "0.78rem", lineHeight: 1.6, color: "var(--color-text-secondary)", whiteSpace: "pre-wrap",
+                      }}>
+                        {scan.report_text}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Clinical notes for THIS scan */}
+                  <p style={{ margin: "0 0 10px", fontWeight: 700, fontSize: "0.82rem", color: "var(--color-text-primary)" }}>
+                    Clinical Notes {notes.length > 0 && <span style={{ color: "var(--color-text-light)", fontWeight: 400 }}>({notes.length})</span>}
+                  </p>
+
+                  {notesLoading && <p style={{ fontSize: "0.82rem", color: "var(--color-text-light)" }}>Loading notes…</p>}
+
+                  {!notesLoading && notes.length === 0 && (
+                    <p style={{ fontSize: "0.82rem", color: "var(--color-text-light)", fontStyle: "italic", marginBottom: 12 }}>
+                      No clinical notes yet. Be the first to review.
+                    </p>
+                  )}
+
+                  {!notesLoading && notes.map(note => (
+                    <div key={note.id} style={{
+                      borderLeft: `3px solid ${VERDICT_CFG[note.verdict]?.color || "#e5e7eb"}`,
+                      paddingLeft: 12, marginBottom: 12,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+                        <VerdictBadge verdict={note.verdict} />
+                        <span style={{ fontSize: "0.72rem", color: "var(--color-text-light)" }}>
+                          Dr. {note.doctor_name} · {fmt(note.created_at)}
+                        </span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>
+                        {note.note_text}
+                      </p>
+                    </div>
+                  ))}
+
+                  <NoteForm
+                    scanId={scan.id}
+                    authFetch={authFetch}
+                    onAdded={note => setNotesByScan(prev => ({ ...prev, [scan.id]: [note, ...(prev[scan.id] || [])] }))}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
